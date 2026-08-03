@@ -1,0 +1,279 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Peran {
+  Pemilik
+  Kasir
+}
+
+enum PaymentMethod {
+  Cash
+  Qris
+}
+
+enum KasStatus {
+  Aktif
+  Selesai
+}
+
+enum MutasiTipe {
+  Pemasukan
+  Pengeluaran
+}
+
+model Tenant {
+  id         String   @id @default(uuid())
+  nama       String
+  aktif      Boolean  @default(true)
+  waktuDibuat DateTime @default(now())
+  users      User[]
+  gerai      Gerai[]
+}
+
+model User {
+  id           String     @id @default(uuid())
+  tenantId     String
+  tenant       Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  nama         String
+  email        String     @unique
+  passwordHash String
+  peran        Peran      @default(Kasir)
+  aktif        Boolean    @default(true)
+  waktuDibuat  DateTime   @default(now())
+  gerai        UserGerai[]
+  cashShifts   CashShift[]
+  @@index([tenantId])
+}
+
+model Gerai {
+  id          String   @id @default(uuid())
+  tenantId    String
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  nama        String
+  alamat      String?
+  aktif       Boolean  @default(true)
+  waktuDibuat DateTime @default(now())
+  users       UserGerai[]
+  products    Product[]
+  @@index([tenantId])
+}
+
+model UserGerai {
+  userId  String
+  user    User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  geraiId String
+  gerai   Gerai  @relation(fields: [geraiId], references: [id], onDelete: Cascade)
+  @@id([userId, geraiId])
+}
+
+// ── Tabel data syncable (semua punya tenantId + geraiId + versi) ──
+
+model Product {
+  id           String   @id
+  tenantId     String
+  geraiId      String
+  gerai        Gerai    @relation(fields: [geraiId], references: [id], onDelete: Cascade)
+  versi        BigInt   @default(0)
+  nama         String
+  harga        Int
+  stok         Int      @default(0)
+  kategori     String?
+  deskripsi    String?
+  favorit      Boolean  @default(false)
+  aktif        Boolean  @default(true)
+  dihapus      Boolean  @default(false)
+  waktuDibuat  DateTime @default(now())
+  waktuDiubah  DateTime @updatedAt
+  @@unique([geraiId, id])
+  @@index([tenantId, geraiId])
+  @@index([geraiId, versi])
+}
+
+model Transaction {
+  id               String        @id
+  tenantId         String
+  geraiId          String
+  versi            BigInt        @default(0)
+  nomor            String
+  waktu            DateTime
+  metodePembayaran PaymentMethod
+  jumlahItem       Int
+  total            Int
+  dibayar          Int
+  kembalian        Int
+  dibatalkan       Boolean       @default(false)
+  dibuatOleh       String?
+  dihapus          Boolean       @default(false)
+  waktuDiubah      DateTime      @updatedAt
+  items            TransactionItem[]
+  @@index([tenantId, geraiId, waktu])
+  @@index([geraiId, versi])
+}
+
+model TransactionItem {
+  id            String      @id
+  tenantId      String
+  geraiId       String
+  versi         BigInt      @default(0)
+  transactionId String
+  transaction   Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  productId     String
+  namaProduk    String
+  hargaSatuan   Int
+  jumlah        Int
+  subtotal      Int
+  @@index([transactionId])
+}
+
+model Table {
+  id           String   @id
+  tenantId     String
+  geraiId      String
+  versi        BigInt   @default(0)
+  nomor        String
+  aktif        Boolean  @default(true)
+  dihapus      Boolean  @default(false)
+  waktuDiubah  DateTime @updatedAt
+  @@index([tenantId, geraiId])
+  @@index([geraiId, versi])
+}
+
+model CashShift {
+  id            String    @id
+  tenantId      String
+  geraiId       String
+  versi         BigInt    @default(0)
+  waktuBuka     DateTime
+  waktuTutup    DateTime?
+  saldoAwal     Int
+  saldoAkhir    Int?
+  catatanBuka   String?
+  catatanTutup  String?
+  dibuatOleh    String?
+  userId        String?
+  user          User?     @relation(fields: [userId], references: [id])
+  dihapus       Boolean   @default(false)
+  waktuDiubah   DateTime  @updatedAt
+  mutations     CashMutation[]
+  setoran       Setoran[]
+  @@index([tenantId, geraiId])
+  @@index([geraiId, versi])
+}
+
+model CashMutation {
+  id           String    @id
+  tenantId     String
+  geraiId      String
+  versi        BigInt    @default(0)
+  shiftId      String
+  shift        CashShift @relation(fields: [shiftId], references: [id], onDelete: Cascade)
+  tipe         MutasiTipe
+  kategori     String
+  nominal      Int
+  catatan      String?
+  waktu        DateTime
+  dihapus      Boolean   @default(false)
+  waktuDiubah  DateTime  @updatedAt
+  @@index([shiftId])
+  @@index([geraiId, versi])
+}
+
+model Setoran {
+  id           String    @id
+  tenantId     String
+  geraiId      String
+  versi        BigInt    @default(0)
+  shiftId      String
+  shift        CashShift @relation(fields: [shiftId], references: [id], onDelete: Cascade)
+  nominal      Int
+  catatan      String?
+  waktu        DateTime
+  dihapus      Boolean   @default(false)
+  waktuDiubah  DateTime  @updatedAt
+  @@index([shiftId])
+  @@index([geraiId, versi])
+}
+
+model Bahan {
+  id           String    @id
+  tenantId     String
+  geraiId      String
+  versi        BigInt    @default(0)
+  nama         String
+  satuan       String
+  stok         Int       @default(0)
+  hargaBeli    Int
+  stokMinimum  Int       @default(0)
+  aktif        Boolean   @default(true)
+  dihapus      Boolean   @default(false)
+  waktuDiubah  DateTime  @updatedAt
+  @@index([tenantId, geraiId])
+  @@index([geraiId, versi])
+}
+
+model PembelianBahan {
+  id          String   @id
+  tenantId    String
+  geraiId     String
+  versi       BigInt   @default(0)
+  bahanId     String
+  namaBahan   String
+  jumlah      Int
+  hargaTotal  Int
+  waktu       DateTime
+  dihapus     Boolean  @default(false)
+  waktuDiubah DateTime @updatedAt
+  @@index([geraiId, versi])
+}
+
+model Resep {
+  id          String        @id
+  tenantId    String
+  geraiId     String
+  versi       BigInt        @default(0)
+  productId   String
+  namaProduk  String
+  dihapus     Boolean       @default(false)
+  waktuDiubah DateTime      @updatedAt
+  bahan       ResepBahan[]
+  @@index([geraiId, versi])
+}
+
+model ResepBahan {
+  id          String   @id
+  tenantId    String
+  geraiId     String
+  versi       BigInt   @default(0)
+  resepId     String
+  resep       Resep    @relation(fields: [resepId], references: [id], onDelete: Cascade)
+  bahanId     String
+  namaBahan   String
+  jumlah      Int
+  @@index([resepId])
+}
+
+model StoreSetting {
+  id          String  @id
+  tenantId    String
+  geraiId     String
+  versi       BigInt  @default(0)
+  namaUsaha   String
+  alamat      String?
+  tagline     String?
+  logoUri     String?
+  @@unique([geraiId, id])
+  @@index([tenantId, geraiId])
+}
+
+model SyncCursor {
+  tenantId        String
+  geraiId         String
+  entitas         String
+  waktuSinkron    DateTime
+  @@id([tenantId, geraiId, entitas])
+}
