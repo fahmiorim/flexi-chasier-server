@@ -5,6 +5,7 @@ import authRoutes from './routes/auth.js';
 import geraiRoutes from './routes/gerai.js';
 import syncRoutes from './routes/sync.js';
 import laporanRoutes from './routes/laporan.js';
+import produkRoutes from './routes/produk.js';
 
 const app = express();
 
@@ -19,6 +20,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/gerai', geraiRoutes);
 app.use('/api/sync', syncRoutes);
 app.use('/api/laporan', laporanRoutes);
+app.use('/api/produk', produkRoutes);
 
 app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   console.error(err);
