@@ -691,6 +691,11 @@ router.post('/resep', async (req: Request, res) => {
       );
       if (!masuk) continue;
 
+      // Baris bahan lama dihapus dulu: resepBahan tidak punya flag dihapus,
+      // jadi daftar bahan dianggap state final saat resep naik versi.
+      // (Baris yang dihapus di klien tidak boleh "hidup lagi" di pull berikutnya.)
+      await tx.resepBahan.deleteMany({ where: { resepId: item.id } });
+
       for (const rb of item.bahan) {
         await upsertLww(
           () => tx.resepBahan.findUnique({ where: { id: rb.id }, select: { versi: true } }).then((r) => r?.versi ?? null),

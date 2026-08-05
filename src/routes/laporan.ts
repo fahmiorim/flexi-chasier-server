@@ -122,6 +122,8 @@ router.get('/rekap-kas', async (req: Request, res) => {
       waktuTutupEpochMili: s.waktuTutup?.getTime() ?? null,
       saldoAwal: s.saldoAwal,
       saldoAkhir: s.saldoAkhir,
+      catatanBuka: s.catatanBuka,
+      catatanTutup: s.catatanTutup,
       penjualan: tunai + qris,
       penjualanTunai: tunai,
       penjualanQris: qris,
@@ -315,6 +317,42 @@ router.get('/mutasi', async (req: Request, res) => {
       nominal: m.nominal,
       catatan: m.catatan,
       waktuEpochMili: m.waktu.getTime(),
+    })),
+  });
+});
+
+
+// ── Daftar setoran kas ──
+
+router.get('/setoran', async (req: Request, res) => {
+  const parsed = mutasiSchema.safeParse(req.query);
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'Parameter tidak valid' });
+  }
+  const { geraiId, dari, sampai, limit } = parsed.data;
+  if (!(await cekAksesGerai(req, geraiId))) {
+    return res.status(403).json({ error: 'Tidak punya akses ke gerai ini' });
+  }
+
+  const setoran = await prisma.setoran.findMany({
+    where: {
+      geraiId,
+      dihapus: false,
+      waktu: { gte: new Date(dari), lte: new Date(sampai) },
+    },
+    include: { shift: { select: { id: true, waktuBuka: true } } },
+    orderBy: { waktu: 'asc' },
+    take: limit,
+  });
+
+  return res.json({
+    hasil: setoran.map((st) => ({
+      id: st.id,
+      shiftId: st.shiftId,
+      waktuShiftBukaEpochMili: st.shift.waktuBuka.getTime(),
+      nominal: st.nominal,
+      catatan: st.catatan,
+      waktuEpochMili: st.waktu.getTime(),
     })),
   });
 });
