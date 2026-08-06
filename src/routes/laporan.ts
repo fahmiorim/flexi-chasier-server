@@ -38,6 +38,12 @@ async function hppPerProduk(geraiId: string): Promise<Map<string, number>> {
   return new Map(rows.map((r) => [r.productId, Number(r.hpp)]));
 }
 
+/** Peta id user → nama untuk audit trail "dibuat oleh". */
+async function petaNamaUser(tenantId: string): Promise<Map<string, string>> {
+  const users = await prisma.user.findMany({ where: { tenantId }, select: { id: true, nama: true } });
+  return new Map(users.map((u) => [u.id, u.nama]));
+}
+
 // ── Penjualan harian ──
 
 router.get('/penjualan-harian', async (req: Request, res) => {
@@ -366,6 +372,7 @@ router.get('/mutasi', async (req: Request, res) => {
 
   const totalPemasukan = ringkasan.find((r) => r.tipe === 'Pemasukan')?._sum.nominal ?? 0;
   const totalPengeluaran = ringkasan.find((r) => r.tipe === 'Pengeluaran')?._sum.nominal ?? 0;
+  const namaUser = await petaNamaUser(req.user.tenantId);
 
   return res.json({
     totalPemasukan,
@@ -378,6 +385,8 @@ router.get('/mutasi', async (req: Request, res) => {
       kategori: m.kategori,
       nominal: m.nominal,
       catatan: m.catatan,
+      dibuatOleh: m.dibuatOleh,
+      dibuatOlehNama: m.dibuatOleh ? namaUser.get(m.dibuatOleh) ?? null : null,
       waktuEpochMili: m.waktu.getTime(),
     })),
   });
@@ -407,6 +416,8 @@ router.get('/setoran', async (req: Request, res) => {
     take: limit,
   });
 
+  const namaUser = await petaNamaUser(req.user.tenantId);
+
   return res.json({
     hasil: setoran.map((st) => ({
       id: st.id,
@@ -414,6 +425,8 @@ router.get('/setoran', async (req: Request, res) => {
       waktuShiftBukaEpochMili: st.shift.waktuBuka.getTime(),
       nominal: st.nominal,
       catatan: st.catatan,
+      dibuatOleh: st.dibuatOleh,
+      dibuatOlehNama: st.dibuatOleh ? namaUser.get(st.dibuatOleh) ?? null : null,
       waktuEpochMili: st.waktu.getTime(),
     })),
   });
@@ -534,6 +547,7 @@ router.get('/penyesuaian-stok', async (req: Request, res) => {
     }),
     prisma.penyesuaianStok.count({ where }),
   ]);
+  const namaUser = await petaNamaUser(req.user.tenantId);
 
   return res.json({
     jumlah,
@@ -547,6 +561,7 @@ router.get('/penyesuaian-stok', async (req: Request, res) => {
       selisih: p.selisih,
       alasan: p.alasan,
       dibuatOleh: p.dibuatOleh,
+      dibuatOlehNama: p.dibuatOleh ? namaUser.get(p.dibuatOleh) ?? null : null,
       waktuEpochMili: p.waktu.getTime(),
     })),
   });

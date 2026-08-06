@@ -195,6 +195,7 @@ model CashMutation {
   kategori     String
   nominal      Int
   catatan      String?
+  dibuatOleh   String?
   waktu        DateTime
   dihapus      Boolean   @default(false)
   waktuDiubah  DateTime  @updatedAt
@@ -211,6 +212,7 @@ model Setoran {
   shift        CashShift @relation(fields: [shiftId], references: [id], onDelete: Cascade)
   nominal      Int
   catatan      String?
+  dibuatOleh   String?
   waktu        DateTime
   dihapus      Boolean   @default(false)
   waktuDiubah  DateTime  @updatedAt
