@@ -42,7 +42,7 @@ if (originCors) {
 app.use(express.json({ limit: '20mb' }));
 
 app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', nama: 'flexi-chasier-server' });
+  res.json({ status: 'ok', nama: 'flexi-kasir-server' });
 });
 
 app.use('/api/auth', authRoutes);
@@ -61,5 +61,5 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
 const port = Number(process.env.PORT ?? 4000);
 
 app.listen(port, () => {
-  console.log(`flexi-chasier-server berjalan di http://localhost:${port}`);
+  console.log(`flexi-kasir-server berjalan di http://localhost:${port}`);
 });

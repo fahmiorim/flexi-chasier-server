@@ -1,6 +1,6 @@
-# Flexi Chasier Server
+# Flexi Kasir Server
 
-Backend untuk aplikasi kasir **Flexi Chasier** (Android + website) — multi-tenant, multi-gerai, dengan sinkronisasi dua arah.
+Backend untuk aplikasi kasir **Flexi Kasir** (Android + website) — multi-tenant, multi-gerai, dengan sinkronisasi dua arah.
 
 - **Stack:** Node.js (>= 20) + Express 5 + Prisma 7 + PostgreSQL
 - **Auth:** JWT (access + refresh), password di-hash dengan bcrypt
@@ -37,8 +37,8 @@ Backend untuk aplikasi kasir **Flexi Chasier** (Android + website) — multi-ten
 ### 1. Clone & masuk folder
 
 ```bash
-git clone <url-repo> flexi-chasier-server
-cd flexi-chasier-server
+git clone <url-repo> flexi-kasir-server
+cd flexi-kasir-server
 ```
 
 ### 2. Buat database PostgreSQL
@@ -122,7 +122,7 @@ npm start       # node dist/index.js
 Jika berhasil akan muncul:
 
 ```
-flexi-chasier-server berjalan di http://localhost:4000
+flexi-kasir-server berjalan di http://localhost:4000
 ```
 
 ---
@@ -132,7 +132,7 @@ flexi-chasier-server berjalan di http://localhost:4000
 ```bash
 # 1. Health check
 curl http://localhost:4000/health
-# => {"status":"ok","nama":"flexi-chasier-server"}
+# => {"status":"ok","nama":"flexi-kasir-server"}
 
 # 2. Registrasi akun pertama (Pemilik)
 curl -X POST http://localhost:4000/api/auth/register \
@@ -310,7 +310,7 @@ prisma/
 
 ## Integrasi dengan Android
 
-Aplikasi `flexi-chasier` (Android) memanggil backend ini untuk:
+Aplikasi `flexi-kasir` (Android) memanggil backend ini untuk:
 
 - Login/register & pemilihan gerai (`/api/auth/*`)
 - Katalog produk per gerai (`/api/produk`)
