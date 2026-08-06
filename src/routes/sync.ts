@@ -1,5 +1,6 @@
 import { Router, type Request } from 'express';
 import { z } from 'zod';
+import { Prisma } from '@prisma/client';
 import { prisma } from '../lib/prisma.js';
 import { requireAuth } from '../middleware/auth.js';
 import { cekAksesGerai } from '../lib/akses-gerai.js';
@@ -10,20 +11,37 @@ router.use(requireAuth);
 
 
 /**
- * Upsert idempotent dengan aturan last-write-wins:
- * hanya diterima jika versi baru >= versi yang tersimpan.
+ * Upsert idempotent last-write-wins ATOMIK (tanpa TOCTOU) dengan guard gerai.
+ *
+ * Alur:
+ * 1. UPDATE bersyarat: hanya baris dengan `id` + `geraiId` cocok DAN
+ *    `versi < versiBaru` yang berubah. Ini satu pernyataan SQL — PostgreSQL
+ *    mengunci baris saat UPDATE, jadi dua push konkuren tidak bisa lagi
+ *    "baca versi, lalu tulis" (race lama yang membuat last-write-wins bocor).
+ * 2. Jika 0 baris terubah: baris sudah ada → versi basi ATAU gerai lain →
+ *    tolak. Data gerai lain tidak pernah ditimpa lewat bentrok id global.
+ * 3. Jika baris belum ada → CREATE. Create yang balapan (duplikat id global
+ *    pada PK) ditangkap lewat error P2002 dan dianggap tolak.
  */
 async function upsertLww(
-  cekVersi: () => Promise<bigint | null>,
-  simpan: () => Promise<unknown>,
-  versiBaru: number,
+  perbarui: () => Promise<{ count: number }>,
+  cekAda: () => Promise<{ geraiId: string } | null>,
+  buat: () => Promise<unknown>,
 ): Promise<boolean> {
-  const versiLama = await cekVersi();
-  if (versiLama !== null && BigInt(versiBaru) < versiLama) {
-    return false;
+  const hasil = await perbarui();
+  if (hasil.count === 1) return true;
+
+  if ((await cekAda()) !== null) return false;
+
+  try {
+    await buat();
+    return true;
+  } catch (e) {
+    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+      return false;
+    }
+    throw e;
   }
-  await simpan();
-  return true;
 }
 
 // ── PUSH: produk ──
@@ -60,11 +78,26 @@ router.post('/produk', async (req: Request, res) => {
   await prisma.$transaction(async (tx) => {
     for (const item of items) {
       const masuk = await upsertLww(
-        () => tx.product.findUnique({ where: { id: item.id }, select: { versi: true } }).then((r) => r?.versi ?? null),
         () =>
-          tx.product.upsert({
-            where: { id: item.id },
-            create: {
+          tx.product.updateMany({
+            where: { id: item.id, geraiId, versi: { lt: BigInt(item.versi) } },
+            data: {
+              versi: BigInt(item.versi),
+              waktuDiubah: new Date(),
+              nama: item.nama,
+              harga: item.harga,
+              stok: item.stok,
+              kategori: item.kategori,
+              deskripsi: item.deskripsi,
+              favorit: item.favorit,
+              aktif: item.aktif,
+              dihapus: item.dihapus,
+            },
+          }),
+        () => tx.product.findUnique({ where: { id: item.id }, select: { geraiId: true } }),
+        () =>
+          tx.product.create({
+            data: {
               id: item.id,
               tenantId: req.user.tenantId,
               geraiId,
@@ -78,19 +111,7 @@ router.post('/produk', async (req: Request, res) => {
               aktif: item.aktif,
               dihapus: item.dihapus,
             },
-            update: {
-              versi: BigInt(item.versi),
-              nama: item.nama,
-              harga: item.harga,
-              stok: item.stok,
-              kategori: item.kategori,
-              deskripsi: item.deskripsi,
-              favorit: item.favorit,
-              aktif: item.aktif,
-              dihapus: item.dihapus,
-            },
           }),
-        item.versi,
       );
       if (masuk) diterima += 1;
     }
@@ -146,11 +167,28 @@ router.post('/transaksi', async (req: Request, res) => {
   await prisma.$transaction(async (tx) => {
     for (const item of items) {
       const masuk = await upsertLww(
-        () => tx.transaction.findUnique({ where: { id: item.id }, select: { versi: true } }).then((r) => r?.versi ?? null),
         () =>
-          tx.transaction.upsert({
-            where: { id: item.id },
-            create: {
+          tx.transaction.updateMany({
+            where: { id: item.id, geraiId, versi: { lt: BigInt(item.versi) } },
+            data: {
+              versi: BigInt(item.versi),
+              waktuDiubah: new Date(),
+              nomor: item.nomor,
+              waktu: new Date(item.waktuEpochMili),
+              metodePembayaran: item.metodePembayaran,
+              jumlahItem: item.jumlahItem,
+              total: item.total,
+              dibayar: item.dibayar,
+              kembalian: item.kembalian,
+              dibatalkan: item.dibatalkan,
+              dibuatOleh: item.dibuatOleh ?? req.user.id,
+              dihapus: item.dihapus,
+            },
+          }),
+        () => tx.transaction.findUnique({ where: { id: item.id }, select: { geraiId: true } }),
+        () =>
+          tx.transaction.create({
+            data: {
               id: item.id,
               tenantId: req.user.tenantId,
               geraiId,
@@ -166,36 +204,35 @@ router.post('/transaksi', async (req: Request, res) => {
               dibuatOleh: item.dibuatOleh ?? req.user.id,
               dihapus: item.dihapus,
             },
-            update: {
-              versi: BigInt(item.versi),
-              nomor: item.nomor,
-              waktu: new Date(item.waktuEpochMili),
-              metodePembayaran: item.metodePembayaran,
-              jumlahItem: item.jumlahItem,
-              total: item.total,
-              dibayar: item.dibayar,
-              kembalian: item.kembalian,
-              dibatalkan: item.dibatalkan,
-              dibuatOleh: item.dibuatOleh,
-              dihapus: item.dihapus,
-            },
           }),
-        item.versi,
       );
       if (!masuk) continue;
 
-      // Item transaksi dianggap state final saat transaksi naik versi (sama
-      // dengan bahan resep): baris lama dihapus dulu agar item yang dihapus
-      // di klien tidak "hidup lagi" di pull berikutnya.
-      await tx.transactionItem.deleteMany({ where: { transactionId: item.id } });
+      // Item transaksi dianggap state final saat transaksi naik versi.
+      // Upsert per-item tetap dihormati (last-write-wins per versi item),
+      // lalu baris yang TIDAK dikirim klien (dihapus di klien) dibuang agar
+      // tidak "hidup lagi" di pull berikutnya.
+      const daftarIdItem = item.items.map((ti) => ti.id);
 
       for (const ti of item.items) {
         await upsertLww(
-          () => tx.transactionItem.findUnique({ where: { id: ti.id }, select: { versi: true } }).then((r) => r?.versi ?? null),
           () =>
-            tx.transactionItem.upsert({
-              where: { id: ti.id },
-              create: {
+            tx.transactionItem.updateMany({
+              where: { id: ti.id, geraiId, versi: { lt: BigInt(ti.versi) } },
+              data: {
+                versi: BigInt(ti.versi),
+                transactionId: item.id,
+                productId: ti.productId,
+                namaProduk: ti.namaProduk,
+                hargaSatuan: ti.hargaSatuan,
+                jumlah: ti.jumlah,
+                subtotal: ti.subtotal,
+              },
+            }),
+          () => tx.transactionItem.findUnique({ where: { id: ti.id }, select: { geraiId: true } }),
+          () =>
+            tx.transactionItem.create({
+              data: {
                 id: ti.id,
                 tenantId: req.user.tenantId,
                 geraiId,
@@ -207,18 +244,13 @@ router.post('/transaksi', async (req: Request, res) => {
                 jumlah: ti.jumlah,
                 subtotal: ti.subtotal,
               },
-              update: {
-                versi: BigInt(ti.versi),
-                productId: ti.productId,
-                namaProduk: ti.namaProduk,
-                hargaSatuan: ti.hargaSatuan,
-                jumlah: ti.jumlah,
-                subtotal: ti.subtotal,
-              },
             }),
-          ti.versi,
         );
       }
+
+      await tx.transactionItem.deleteMany({
+        where: { transactionId: item.id, geraiId, id: { notIn: daftarIdItem } },
+      });
       diterima += 1;
     }
   });
@@ -255,11 +287,21 @@ router.post('/meja', async (req: Request, res) => {
   await prisma.$transaction(async (tx) => {
     for (const item of items) {
       const masuk = await upsertLww(
-        () => tx.table.findUnique({ where: { id: item.id }, select: { versi: true } }).then((r) => r?.versi ?? null),
         () =>
-          tx.table.upsert({
-            where: { id: item.id },
-            create: {
+          tx.table.updateMany({
+            where: { id: item.id, geraiId, versi: { lt: BigInt(item.versi) } },
+            data: {
+              versi: BigInt(item.versi),
+              waktuDiubah: new Date(),
+              nomor: item.nomor,
+              aktif: item.aktif,
+              dihapus: item.dihapus,
+            },
+          }),
+        () => tx.table.findUnique({ where: { id: item.id }, select: { geraiId: true } }),
+        () =>
+          tx.table.create({
+            data: {
               id: item.id,
               tenantId: req.user.tenantId,
               geraiId,
@@ -268,14 +310,7 @@ router.post('/meja', async (req: Request, res) => {
               aktif: item.aktif,
               dihapus: item.dihapus,
             },
-            update: {
-              versi: BigInt(item.versi),
-              nomor: item.nomor,
-              aktif: item.aktif,
-              dihapus: item.dihapus,
-            },
           }),
-        item.versi,
       );
       if (masuk) diterima += 1;
     }
@@ -318,11 +353,25 @@ router.post('/shift-kas', async (req: Request, res) => {
   await prisma.$transaction(async (tx) => {
     for (const item of items) {
       const masuk = await upsertLww(
-        () => tx.cashShift.findUnique({ where: { id: item.id }, select: { versi: true } }).then((r) => r?.versi ?? null),
         () =>
-          tx.cashShift.upsert({
-            where: { id: item.id },
-            create: {
+          tx.cashShift.updateMany({
+            where: { id: item.id, geraiId, versi: { lt: BigInt(item.versi) } },
+            data: {
+              versi: BigInt(item.versi),
+              waktuDiubah: new Date(),
+              waktuBuka: new Date(item.waktuBukaEpochMili),
+              waktuTutup: item.waktuTutupEpochMili != null ? new Date(item.waktuTutupEpochMili) : null,
+              saldoAwal: item.saldoAwal,
+              saldoAkhir: item.saldoAkhir ?? null,
+              catatanBuka: item.catatanBuka ?? null,
+              catatanTutup: item.catatanTutup ?? null,
+              dibuatOleh: item.dibuatOleh ?? req.user.id,
+            },
+          }),
+        () => tx.cashShift.findUnique({ where: { id: item.id }, select: { geraiId: true } }),
+        () =>
+          tx.cashShift.create({
+            data: {
               id: item.id,
               tenantId: req.user.tenantId,
               geraiId,
@@ -336,18 +385,7 @@ router.post('/shift-kas', async (req: Request, res) => {
               dibuatOleh: item.dibuatOleh ?? req.user.id,
               userId: req.user.id,
             },
-            update: {
-              versi: BigInt(item.versi),
-              waktuBuka: new Date(item.waktuBukaEpochMili),
-              waktuTutup: item.waktuTutupEpochMili != null ? new Date(item.waktuTutupEpochMili) : null,
-              saldoAwal: item.saldoAwal,
-              saldoAkhir: item.saldoAkhir ?? null,
-              catatanBuka: item.catatanBuka ?? null,
-              catatanTutup: item.catatanTutup ?? null,
-              dibuatOleh: item.dibuatOleh,
-            },
           }),
-        item.versi,
       );
       if (masuk) diterima += 1;
     }
@@ -393,11 +431,25 @@ router.post('/mutasi-kas', async (req: Request, res) => {
       if (!shiftAda) continue;
 
       const masuk = await upsertLww(
-        () => tx.cashMutation.findUnique({ where: { id: item.id }, select: { versi: true } }).then((r) => r?.versi ?? null),
         () =>
-          tx.cashMutation.upsert({
-            where: { id: item.id },
-            create: {
+          tx.cashMutation.updateMany({
+            where: { id: item.id, geraiId, versi: { lt: BigInt(item.versi) } },
+            data: {
+              versi: BigInt(item.versi),
+              waktuDiubah: new Date(),
+              shiftId: item.shiftId,
+              tipe: item.tipe,
+              kategori: item.kategori,
+              nominal: item.nominal,
+              catatan: item.catatan ?? null,
+              waktu: new Date(item.waktuEpochMili),
+              dihapus: item.dihapus,
+            },
+          }),
+        () => tx.cashMutation.findUnique({ where: { id: item.id }, select: { geraiId: true } }),
+        () =>
+          tx.cashMutation.create({
+            data: {
               id: item.id,
               tenantId: req.user.tenantId,
               geraiId,
@@ -410,18 +462,7 @@ router.post('/mutasi-kas', async (req: Request, res) => {
               waktu: new Date(item.waktuEpochMili),
               dihapus: item.dihapus,
             },
-            update: {
-              versi: BigInt(item.versi),
-              shiftId: item.shiftId,
-              tipe: item.tipe,
-              kategori: item.kategori,
-              nominal: item.nominal,
-              catatan: item.catatan ?? null,
-              waktu: new Date(item.waktuEpochMili),
-              dihapus: item.dihapus,
-            },
           }),
-        item.versi,
       );
       if (masuk) diterima += 1;
     }
@@ -464,11 +505,23 @@ router.post('/setoran', async (req: Request, res) => {
       if (!shiftAda) continue;
 
       const masuk = await upsertLww(
-        () => tx.setoran.findUnique({ where: { id: item.id }, select: { versi: true } }).then((r) => r?.versi ?? null),
         () =>
-          tx.setoran.upsert({
-            where: { id: item.id },
-            create: {
+          tx.setoran.updateMany({
+            where: { id: item.id, geraiId, versi: { lt: BigInt(item.versi) } },
+            data: {
+              versi: BigInt(item.versi),
+              waktuDiubah: new Date(),
+              shiftId: item.shiftId,
+              nominal: item.nominal,
+              catatan: item.catatan ?? null,
+              waktu: new Date(item.waktuEpochMili),
+              dihapus: item.dihapus,
+            },
+          }),
+        () => tx.setoran.findUnique({ where: { id: item.id }, select: { geraiId: true } }),
+        () =>
+          tx.setoran.create({
+            data: {
               id: item.id,
               tenantId: req.user.tenantId,
               geraiId,
@@ -479,16 +532,7 @@ router.post('/setoran', async (req: Request, res) => {
               waktu: new Date(item.waktuEpochMili),
               dihapus: item.dihapus,
             },
-            update: {
-              versi: BigInt(item.versi),
-              shiftId: item.shiftId,
-              nominal: item.nominal,
-              catatan: item.catatan ?? null,
-              waktu: new Date(item.waktuEpochMili),
-              dihapus: item.dihapus,
-            },
           }),
-        item.versi,
       );
       if (masuk) diterima += 1;
     }
@@ -530,11 +574,25 @@ router.post('/bahan', async (req: Request, res) => {
   await prisma.$transaction(async (tx) => {
     for (const item of items) {
       const masuk = await upsertLww(
-        () => tx.bahan.findUnique({ where: { id: item.id }, select: { versi: true } }).then((r) => r?.versi ?? null),
         () =>
-          tx.bahan.upsert({
-            where: { id: item.id },
-            create: {
+          tx.bahan.updateMany({
+            where: { id: item.id, geraiId, versi: { lt: BigInt(item.versi) } },
+            data: {
+              versi: BigInt(item.versi),
+              waktuDiubah: new Date(),
+              nama: item.nama,
+              satuan: item.satuan,
+              stok: item.stok,
+              hargaBeli: item.hargaBeli,
+              stokMinimum: item.stokMinimum,
+              aktif: item.aktif,
+              dihapus: item.dihapus,
+            },
+          }),
+        () => tx.bahan.findUnique({ where: { id: item.id }, select: { geraiId: true } }),
+        () =>
+          tx.bahan.create({
+            data: {
               id: item.id,
               tenantId: req.user.tenantId,
               geraiId,
@@ -547,18 +605,7 @@ router.post('/bahan', async (req: Request, res) => {
               aktif: item.aktif,
               dihapus: item.dihapus,
             },
-            update: {
-              versi: BigInt(item.versi),
-              nama: item.nama,
-              satuan: item.satuan,
-              stok: item.stok,
-              hargaBeli: item.hargaBeli,
-              stokMinimum: item.stokMinimum,
-              aktif: item.aktif,
-              dihapus: item.dihapus,
-            },
           }),
-        item.versi,
       );
       if (masuk) diterima += 1;
     }
@@ -599,11 +646,24 @@ router.post('/pembelian-bahan', async (req: Request, res) => {
   await prisma.$transaction(async (tx) => {
     for (const item of items) {
       const masuk = await upsertLww(
-        () => tx.pembelianBahan.findUnique({ where: { id: item.id }, select: { versi: true } }).then((r) => r?.versi ?? null),
         () =>
-          tx.pembelianBahan.upsert({
-            where: { id: item.id },
-            create: {
+          tx.pembelianBahan.updateMany({
+            where: { id: item.id, geraiId, versi: { lt: BigInt(item.versi) } },
+            data: {
+              versi: BigInt(item.versi),
+              waktuDiubah: new Date(),
+              bahanId: item.bahanId,
+              namaBahan: item.namaBahan,
+              jumlah: item.jumlah,
+              hargaTotal: item.hargaTotal,
+              waktu: new Date(item.waktuEpochMili),
+              dihapus: item.dihapus,
+            },
+          }),
+        () => tx.pembelianBahan.findUnique({ where: { id: item.id }, select: { geraiId: true } }),
+        () =>
+          tx.pembelianBahan.create({
+            data: {
               id: item.id,
               tenantId: req.user.tenantId,
               geraiId,
@@ -615,17 +675,7 @@ router.post('/pembelian-bahan', async (req: Request, res) => {
               waktu: new Date(item.waktuEpochMili),
               dihapus: item.dihapus,
             },
-            update: {
-              versi: BigInt(item.versi),
-              bahanId: item.bahanId,
-              namaBahan: item.namaBahan,
-              jumlah: item.jumlah,
-              hargaTotal: item.hargaTotal,
-              waktu: new Date(item.waktuEpochMili),
-              dihapus: item.dihapus,
-            },
           }),
-        item.versi,
       );
       if (masuk) diterima += 1;
     }
@@ -672,11 +722,21 @@ router.post('/resep', async (req: Request, res) => {
   await prisma.$transaction(async (tx) => {
     for (const item of items) {
       const masuk = await upsertLww(
-        () => tx.resep.findUnique({ where: { id: item.id }, select: { versi: true } }).then((r) => r?.versi ?? null),
         () =>
-          tx.resep.upsert({
-            where: { id: item.id },
-            create: {
+          tx.resep.updateMany({
+            where: { id: item.id, geraiId, versi: { lt: BigInt(item.versi) } },
+            data: {
+              versi: BigInt(item.versi),
+              waktuDiubah: new Date(),
+              productId: item.productId,
+              namaProduk: item.namaProduk,
+              dihapus: item.dihapus,
+            },
+          }),
+        () => tx.resep.findUnique({ where: { id: item.id }, select: { geraiId: true } }),
+        () =>
+          tx.resep.create({
+            data: {
               id: item.id,
               tenantId: req.user.tenantId,
               geraiId,
@@ -685,29 +745,32 @@ router.post('/resep', async (req: Request, res) => {
               namaProduk: item.namaProduk,
               dihapus: item.dihapus,
             },
-            update: {
-              versi: BigInt(item.versi),
-              productId: item.productId,
-              namaProduk: item.namaProduk,
-              dihapus: item.dihapus,
-            },
           }),
-        item.versi,
       );
       if (!masuk) continue;
 
-      // Baris bahan lama dihapus dulu: resepBahan tidak punya flag dihapus,
-      // jadi daftar bahan dianggap state final saat resep naik versi.
-      // (Baris yang dihapus di klien tidak boleh "hidup lagi" di pull berikutnya.)
-      await tx.resepBahan.deleteMany({ where: { resepId: item.id } });
+      // Bahan resep dianggap state final saat resep naik versi. Upsert
+      // per-bahan tetap dihormati (last-write-wins per versi), lalu baris
+      // yang tidak dikirim klien dibuang agar tidak "hidup lagi" di pull.
+      const daftarIdBahan = item.bahan.map((rb) => rb.id);
 
       for (const rb of item.bahan) {
         await upsertLww(
-          () => tx.resepBahan.findUnique({ where: { id: rb.id }, select: { versi: true } }).then((r) => r?.versi ?? null),
           () =>
-            tx.resepBahan.upsert({
-              where: { id: rb.id },
-              create: {
+            tx.resepBahan.updateMany({
+              where: { id: rb.id, geraiId, versi: { lt: BigInt(rb.versi) } },
+              data: {
+                versi: BigInt(rb.versi),
+                resepId: item.id,
+                bahanId: rb.bahanId,
+                namaBahan: rb.namaBahan,
+                jumlah: rb.jumlah,
+              },
+            }),
+          () => tx.resepBahan.findUnique({ where: { id: rb.id }, select: { geraiId: true } }),
+          () =>
+            tx.resepBahan.create({
+              data: {
                 id: rb.id,
                 tenantId: req.user.tenantId,
                 geraiId,
@@ -717,16 +780,13 @@ router.post('/resep', async (req: Request, res) => {
                 namaBahan: rb.namaBahan,
                 jumlah: rb.jumlah,
               },
-              update: {
-                versi: BigInt(rb.versi),
-                bahanId: rb.bahanId,
-                namaBahan: rb.namaBahan,
-                jumlah: rb.jumlah,
-              },
             }),
-          rb.versi,
         );
       }
+
+      await tx.resepBahan.deleteMany({
+        where: { resepId: item.id, geraiId, id: { notIn: daftarIdBahan } },
+      });
       diterima += 1;
     }
   });
@@ -764,11 +824,22 @@ router.post('/pengaturan-toko', async (req: Request, res) => {
   await prisma.$transaction(async (tx) => {
     for (const item of items) {
       const masuk = await upsertLww(
-        () => tx.storeSetting.findUnique({ where: { id: item.id }, select: { versi: true } }).then((r) => r?.versi ?? null),
         () =>
-          tx.storeSetting.upsert({
-            where: { id: item.id },
-            create: {
+          tx.storeSetting.updateMany({
+            where: { id: item.id, geraiId, versi: { lt: BigInt(item.versi) } },
+            data: {
+              versi: BigInt(item.versi),
+              waktuDiubah: new Date(),
+              namaUsaha: item.namaUsaha,
+              alamat: item.alamat ?? null,
+              tagline: item.tagline ?? null,
+              logoUri: item.logoUri ?? null,
+            },
+          }),
+        () => tx.storeSetting.findUnique({ where: { id: item.id }, select: { geraiId: true } }),
+        () =>
+          tx.storeSetting.create({
+            data: {
               id: item.id,
               tenantId: req.user.tenantId,
               geraiId,
@@ -778,15 +849,7 @@ router.post('/pengaturan-toko', async (req: Request, res) => {
               tagline: item.tagline ?? null,
               logoUri: item.logoUri ?? null,
             },
-            update: {
-              versi: BigInt(item.versi),
-              namaUsaha: item.namaUsaha,
-              alamat: item.alamat ?? null,
-              tagline: item.tagline ?? null,
-              logoUri: item.logoUri ?? null,
-            },
           }),
-        item.versi,
       );
       if (masuk) diterima += 1;
     }

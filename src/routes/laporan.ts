@@ -36,6 +36,7 @@ router.get('/penjualan-harian', async (req: Request, res) => {
       FROM "Transaction"
       WHERE "geraiId" = ${geraiId}
         AND "dibatalkan" = false
+        AND "dihapus" = false
         AND waktu >= TO_TIMESTAMP(${Math.floor(dari / 1000)})
         AND waktu <= TO_TIMESTAMP(${Math.floor(sampai / 1000)})
       GROUP BY DATE_TRUNC('day', waktu)
@@ -88,6 +89,7 @@ router.get('/rekap-kas', async (req: Request, res) => {
       where: {
         geraiId,
         dihapus: false,
+        dibatalkan: false,
         waktu: { gte: new Date(dari), lte: new Date(sampai) },
       },
     }),
@@ -105,9 +107,13 @@ router.get('/rekap-kas', async (req: Request, res) => {
     setoranPerShift.set(s.shiftId, (setoranPerShift.get(s.shiftId) ?? 0) + s.nominal);
   }
 
-  const hasil = shifts.map((s) => {
+  const hasil = shifts.map((s, i) => {
+    // Batas akhir shift = waktu tutup, atau waktu buka shift berikutnya bila
+    // shift ini masih menggantung (waktuTutup null). Tanpa ini, transaksi
+    // setelah shift berikutnya dibuka ikut dihitung ke DUA shift sekaligus.
+    const batasAkhir = s.waktuTutup ?? shifts[i + 1]?.waktuBuka ?? null;
     const transaksi = transactions.filter(
-      (t) => t.waktu >= s.waktuBuka && (s.waktuTutup === null || t.waktu <= s.waktuTutup),
+      (t) => t.waktu >= s.waktuBuka && (batasAkhir === null || t.waktu <= batasAkhir),
     );
     const tunai = transaksi
       .filter((t) => t.metodePembayaran === 'Cash')
@@ -164,7 +170,7 @@ router.get('/penjualan-periode', async (req: Request, res) => {
     .reduce((a, t) => a + t.total, 0);
   const totalQris = totalPenjualan - totalTunai;
   const jumlahItem = transaksi.reduce((a, t) => a + t.jumlahItem, 0);
-  const jumlahHari = Math.max(1, Math.round((sampai - dari) / 86_400_000) + 1);
+  const jumlahHari = Math.max(1, Math.round((sampai - dari) / 86_400_000));
 
   return res.json({
     dariEpochMili: dari,

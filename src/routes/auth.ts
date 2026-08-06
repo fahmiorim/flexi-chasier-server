@@ -368,28 +368,36 @@ router.post('/refresh', async (req, res) => {
       return res.status(401).json({ error: 'Sesi tidak valid' });
     }
     // Rotasi: token lama dicabut, token baru diterbitkan (mencegah pemakaian
-    // ulang token curian).
-    const { token: refreshToken, expiresAt } = signRefreshToken(user.id);
-    await prisma.$transaction([
-      prisma.refreshToken.update({
-        where: { id: tersimpan.id },
+    // ulang token curian). Pencabutan memakai updateMany BERSYARAT (revokedAt
+    // masih null) dan token baru hanya diterbitkan bila tepat 1 baris dicabut —
+    // sehingga dua refresh bersamaan dengan token yang sama tidak pernah
+    // menghasilkan dua token baru (anti-race).
+    const tokenBaru = await prisma.$transaction(async (tx) => {
+      const dicabut = await tx.refreshToken.updateMany({
+        where: { id: tersimpan.id, revokedAt: null },
         data: { revokedAt: new Date() },
-      }),
-      prisma.refreshToken.create({
+      });
+      if (dicabut.count !== 1) return null;
+      const { token: refreshToken, expiresAt } = signRefreshToken(user.id);
+      await tx.refreshToken.create({
         data: {
           userId: user.id,
           tokenHash: hashRefreshToken(refreshToken),
           expiresAt,
         },
-      }),
-    ]);
+      });
+      return refreshToken;
+    });
+    if (tokenBaru === null) {
+      return res.status(401).json({ error: 'Sesi tidak valid' });
+    }
     const accessToken = signAccessToken({
       sub: user.id,
       tenantId: user.tenantId,
       nama: user.nama,
       peran: user.peran,
     });
-    return res.json({ accessToken, refreshToken });
+    return res.json({ accessToken, refreshToken: tokenBaru });
   } catch {
     return res.status(401).json({ error: 'refreshToken tidak valid' });
   }
