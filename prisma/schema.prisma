@@ -119,6 +119,12 @@ model Transaction {
   total            Int
   dibayar          Int
   kembalian        Int
+  potongan         Int           @default(0)
+  biayaLayanan     Int           @default(0)
+  pajak            Int           @default(0)
+  status           String        @default("Paid")
+  orderType        String        @default("DineIn")
+  catatan          String?
   dibatalkan       Boolean       @default(false)
   dibuatOleh       String?
   dihapus          Boolean       @default(false)
