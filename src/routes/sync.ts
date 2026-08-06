@@ -54,6 +54,7 @@ const productSchema = z.object({
   stok: z.number().int().nonnegative().default(0),
   kategori: z.string().nullable().optional(),
   deskripsi: z.string().nullable().optional(),
+  fotoUri: z.string().nullable().optional(),
   favorit: z.boolean().default(false),
   aktif: z.boolean().default(true),
   dihapus: z.boolean().default(false),
@@ -89,6 +90,7 @@ router.post('/produk', async (req: Request, res) => {
               stok: item.stok,
               kategori: item.kategori,
               deskripsi: item.deskripsi,
+              fotoUri: item.fotoUri ?? null,
               favorit: item.favorit,
               aktif: item.aktif,
               dihapus: item.dihapus,
@@ -107,6 +109,7 @@ router.post('/produk', async (req: Request, res) => {
               stok: item.stok,
               kategori: item.kategori,
               deskripsi: item.deskripsi,
+              fotoUri: item.fotoUri ?? null,
               favorit: item.favorit,
               aktif: item.aktif,
               dihapus: item.dihapus,
@@ -858,6 +861,155 @@ router.post('/pengaturan-toko', async (req: Request, res) => {
   return res.json({ diterima, total: items.length });
 });
 
+// ── PUSH: penyesuaian stok ──
+
+const penyesuaianStokSchema = z.object({
+  id: z.string().min(1),
+  versi: z.number().int().nonnegative(),
+  jenis: z.enum(['Bahan', 'Produk']),
+  entitasId: z.string().min(1),
+  namaEntitas: z.string().nullable().optional(),
+  stokSebelum: z.number().int().nonnegative(),
+  stokSesudah: z.number().int().nonnegative(),
+  selisih: z.number().int(),
+  alasan: z.string().nullable().optional(),
+  dibuatOleh: z.string().nullable().optional(),
+  waktuEpochMili: z.number().int().nonnegative(),
+  dihapus: z.boolean().default(false),
+});
+
+const pushPenyesuaianStokSchema = z.object({
+  geraiId: z.string().min(1),
+  items: z.array(penyesuaianStokSchema).max(500),
+});
+
+router.post('/penyesuaian-stok', async (req: Request, res) => {
+  const parsed = pushPenyesuaianStokSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'Payload tidak valid' });
+  }
+  const { geraiId, items } = parsed.data;
+  if (!(await cekAksesGerai(req, geraiId))) {
+    return res.status(403).json({ error: 'Tidak punya akses ke gerai ini' });
+  }
+
+  let diterima = 0;
+  await prisma.$transaction(async (tx) => {
+    for (const item of items) {
+      const masuk = await upsertLww(
+        () =>
+          tx.penyesuaianStok.updateMany({
+            where: { id: item.id, geraiId, versi: { lt: BigInt(item.versi) } },
+            data: {
+              versi: BigInt(item.versi),
+              waktuDiubah: new Date(),
+              jenis: item.jenis,
+              entitasId: item.entitasId,
+              namaEntitas: item.namaEntitas ?? null,
+              stokSebelum: item.stokSebelum,
+              stokSesudah: item.stokSesudah,
+              selisih: item.selisih,
+              alasan: item.alasan ?? null,
+              dibuatOleh: item.dibuatOleh ?? req.user.id,
+              waktu: new Date(item.waktuEpochMili),
+              dihapus: item.dihapus,
+            },
+          }),
+        () => tx.penyesuaianStok.findUnique({ where: { id: item.id }, select: { geraiId: true } }),
+        () =>
+          tx.penyesuaianStok.create({
+            data: {
+              id: item.id,
+              tenantId: req.user.tenantId,
+              geraiId,
+              versi: BigInt(item.versi),
+              jenis: item.jenis,
+              entitasId: item.entitasId,
+              namaEntitas: item.namaEntitas ?? null,
+              stokSebelum: item.stokSebelum,
+              stokSesudah: item.stokSesudah,
+              selisih: item.selisih,
+              alasan: item.alasan ?? null,
+              dibuatOleh: item.dibuatOleh ?? req.user.id,
+              waktu: new Date(item.waktuEpochMili),
+              dihapus: item.dihapus,
+            },
+          }),
+      );
+      if (masuk) diterima += 1;
+    }
+  });
+
+  return res.json({ diterima, total: items.length });
+});
+
+// ── PUSH: mutasi rekening ──
+
+const mutasiRekeningSchema = z.object({
+  id: z.string().min(1),
+  versi: z.number().int().nonnegative(),
+  tipe: z.enum(['SaldoAwal', 'Pemasukan', 'Penarikan']),
+  nominal: z.number().int().nonnegative(),
+  catatan: z.string().nullable().optional(),
+  waktuEpochMili: z.number().int().nonnegative(),
+  dihapus: z.boolean().default(false),
+});
+
+const pushMutasiRekeningSchema = z.object({
+  geraiId: z.string().min(1),
+  items: z.array(mutasiRekeningSchema).max(500),
+});
+
+router.post('/mutasi-rekening', async (req: Request, res) => {
+  const parsed = pushMutasiRekeningSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'Payload tidak valid' });
+  }
+  const { geraiId, items } = parsed.data;
+  if (!(await cekAksesGerai(req, geraiId))) {
+    return res.status(403).json({ error: 'Tidak punya akses ke gerai ini' });
+  }
+
+  let diterima = 0;
+  await prisma.$transaction(async (tx) => {
+    for (const item of items) {
+      const masuk = await upsertLww(
+        () =>
+          tx.mutasiRekening.updateMany({
+            where: { id: item.id, geraiId, versi: { lt: BigInt(item.versi) } },
+            data: {
+              versi: BigInt(item.versi),
+              waktuDiubah: new Date(),
+              tipe: item.tipe,
+              nominal: item.nominal,
+              catatan: item.catatan ?? null,
+              waktu: new Date(item.waktuEpochMili),
+              dihapus: item.dihapus,
+            },
+          }),
+        () => tx.mutasiRekening.findUnique({ where: { id: item.id }, select: { geraiId: true } }),
+        () =>
+          tx.mutasiRekening.create({
+            data: {
+              id: item.id,
+              tenantId: req.user.tenantId,
+              geraiId,
+              versi: BigInt(item.versi),
+              tipe: item.tipe,
+              nominal: item.nominal,
+              catatan: item.catatan ?? null,
+              waktu: new Date(item.waktuEpochMili),
+              dihapus: item.dihapus,
+            },
+          }),
+      );
+      if (masuk) diterima += 1;
+    }
+  });
+
+  return res.json({ diterima, total: items.length });
+});
+
 // ── PULL: semua entitas (produk, transaksi + item, meja, kas, bahan, resep, pengaturan-toko) ──
 
 const pullSchema = z.object({
@@ -873,6 +1025,8 @@ const pullSchema = z.object({
   pembelianBahan: z.string().default('0:'),
   resep: z.string().default('0:'),
   pengaturanToko: z.string().default('0:'),
+  penyesuaianStok: z.string().default('0:'),
+  mutasiRekening: z.string().default('0:'),
 });
 
 /** Format kursor per entitas: "<epochMili>:<id>". Kursor "0:" berarti dari awal. */
@@ -930,6 +1084,8 @@ router.get('/perubahan', async (req: Request, res) => {
     pembelianBahan,
     resep,
     storeSettings,
+    penyesuaianStok,
+    mutasiRekening,
   ] = await Promise.all([
     prisma.product.findMany({
       where: keysetSejak(geraiId, kursorEntitas.produk),
@@ -981,6 +1137,16 @@ router.get('/perubahan', async (req: Request, res) => {
       orderBy: [{ waktuDiubah: 'asc' }, { id: 'asc' }],
       take: batasUji,
     }),
+    prisma.penyesuaianStok.findMany({
+      where: keysetSejak(geraiId, kursorEntitas.penyesuaianStok),
+      orderBy: [{ waktuDiubah: 'asc' }, { id: 'asc' }],
+      take: batasUji,
+    }),
+    prisma.mutasiRekening.findMany({
+      where: keysetSejak(geraiId, kursorEntitas.mutasiRekening),
+      orderBy: [{ waktuDiubah: 'asc' }, { id: 'asc' }],
+      take: batasUji,
+    }),
   ]);
 
   // Item transaksi & resepBahan tidak punya waktuDiubah sendiri: ikuti induknya.
@@ -1017,6 +1183,8 @@ router.get('/perubahan', async (req: Request, res) => {
   const lebihPembelianBahan = pembelianBahan.length > batas;
   const lebihResep = resep.length > batas;
   const lebihStoreSetting = storeSettings.length > batas;
+  const lebihPenyesuaianStok = penyesuaianStok.length > batas;
+  const lebihMutasiRekening = mutasiRekening.length > batas;
 
   if (lebihProduk) products.length = batas;
   if (lebihTransaksi) transactions.length = batas;
@@ -1028,6 +1196,8 @@ router.get('/perubahan', async (req: Request, res) => {
   if (lebihPembelianBahan) pembelianBahan.length = batas;
   if (lebihResep) resep.length = batas;
   if (lebihStoreSetting) storeSettings.length = batas;
+  if (lebihPenyesuaianStok) penyesuaianStok.length = batas;
+  if (lebihMutasiRekening) mutasiRekening.length = batas;
 
   const terpotong =
     lebihProduk ||
@@ -1039,7 +1209,9 @@ router.get('/perubahan', async (req: Request, res) => {
     lebihBahan ||
     lebihPembelianBahan ||
     lebihResep ||
-    lebihStoreSetting;
+    lebihStoreSetting ||
+    lebihPenyesuaianStok ||
+    lebihMutasiRekening;
 
   // Kursor baru per entitas: lanjut hanya sejauh baris yang benar-benar dikirim
   // (kunci keyset). Bila ada entitas terpotong, klien menarik lagi dengan
@@ -1055,6 +1227,8 @@ router.get('/perubahan', async (req: Request, res) => {
     pembelianBahan: kursorBaru(pembelianBahan, kursorEntitas.pembelianBahan),
     resep: kursorBaru(resep, kursorEntitas.resep),
     pengaturanToko: kursorBaru(storeSettings, kursorEntitas.pengaturanToko),
+    penyesuaianStok: kursorBaru(penyesuaianStok, kursorEntitas.penyesuaianStok),
+    mutasiRekening: kursorBaru(mutasiRekening, kursorEntitas.mutasiRekening),
   };
 
   return res.json({
@@ -1068,6 +1242,7 @@ router.get('/perubahan', async (req: Request, res) => {
       stok: p.stok,
       kategori: p.kategori,
       deskripsi: p.deskripsi,
+      fotoUri: p.fotoUri,
       favorit: p.favorit,
       aktif: p.aktif,
       dihapus: p.dihapus,
@@ -1179,6 +1354,29 @@ router.get('/perubahan', async (req: Request, res) => {
       alamat: s.alamat,
       tagline: s.tagline,
       logoUri: s.logoUri,
+    })),
+    penyesuaianStok: penyesuaianStok.map((ps) => ({
+      id: ps.id,
+      versi: Number(ps.versi),
+      jenis: ps.jenis,
+      entitasId: ps.entitasId,
+      namaEntitas: ps.namaEntitas,
+      stokSebelum: ps.stokSebelum,
+      stokSesudah: ps.stokSesudah,
+      selisih: ps.selisih,
+      alasan: ps.alasan,
+      dibuatOleh: ps.dibuatOleh,
+      waktuEpochMili: ps.waktu.getTime(),
+      dihapus: ps.dihapus,
+    })),
+    mutasiRekening: mutasiRekening.map((mr) => ({
+      id: mr.id,
+      versi: Number(mr.versi),
+      tipe: mr.tipe,
+      nominal: mr.nominal,
+      catatan: mr.catatan,
+      waktuEpochMili: mr.waktu.getTime(),
+      dihapus: mr.dihapus,
     })),
   });
 });

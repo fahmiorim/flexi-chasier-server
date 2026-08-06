@@ -22,7 +22,7 @@ interface ResponsProduk {
   kode_pindai: null;
   deskripsi: string | null;
   aktif: boolean;
-  foto_uri: null;
+  foto_uri: string | null;
   favorit: boolean;
   harga_modal: null;
   kategori: string;
@@ -37,6 +37,7 @@ function keResponsProduk(p: {
   stok: number;
   kategori: string | null;
   deskripsi: string | null;
+  fotoUri: string | null;
   favorit: boolean;
   aktif: boolean;
 }): ResponsProduk {
@@ -48,7 +49,7 @@ function keResponsProduk(p: {
     kode_pindai: null,
     deskripsi: p.deskripsi,
     aktif: p.aktif,
-    foto_uri: null,
+    foto_uri: p.fotoUri,
     favorit: p.favorit,
     harga_modal: null,
     kategori: p.kategori ?? '',

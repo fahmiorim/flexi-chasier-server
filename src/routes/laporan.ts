@@ -16,6 +16,28 @@ const rentangSchema = z.object({
   sampai: z.coerce.number().int().default(() => Date.now()),
 });
 
+/**
+ * HPP (harga pokok) per produk = Σ jumlah bahan dalam resep × hargaBeli bahan.
+ * Dihitung dari data bahan & resep TERKINI (bukan snapshot per transaksi),
+ * jadi perubahan harga beli tercermin di laporan berikutnya.
+ */
+async function hppPerProduk(geraiId: string): Promise<Map<string, number>> {
+  const rows = await prisma.$queryRaw<Array<{ productId: string; hpp: bigint }>>(
+    Prisma.sql`
+      SELECT r."productId",
+             SUM(rb.jumlah * b."hargaBeli")::BIGINT AS hpp
+      FROM "ResepBahan" rb
+      JOIN "Resep" r ON r.id = rb."resepId"
+      JOIN "Bahan" b ON b.id = rb."bahanId"
+      WHERE r."geraiId" = ${geraiId}
+        AND r."dihapus" = false
+        AND b."dihapus" = false
+      GROUP BY r."productId"
+    `,
+  );
+  return new Map(rows.map((r) => [r.productId, Number(r.hpp)]));
+}
+
 // ── Penjualan harian ──
 
 router.get('/penjualan-harian', async (req: Request, res) => {
@@ -154,15 +176,30 @@ router.get('/penjualan-periode', async (req: Request, res) => {
     return res.status(403).json({ error: 'Tidak punya akses ke gerai ini' });
   }
 
-  const transaksi = await prisma.transaction.findMany({
-    where: {
-      geraiId,
-      dihapus: false,
-      dibatalkan: false,
-      waktu: { gte: new Date(dari), lte: new Date(sampai) },
-    },
-    select: { total: true, metodePembayaran: true, jumlahItem: true },
-  });
+  const [transaksi, itemTerjual, hppMap] = await Promise.all([
+    prisma.transaction.findMany({
+      where: {
+        geraiId,
+        dihapus: false,
+        dibatalkan: false,
+        waktu: { gte: new Date(dari), lte: new Date(sampai) },
+      },
+      select: { total: true, metodePembayaran: true, jumlahItem: true },
+    }),
+    prisma.transactionItem.findMany({
+      where: {
+        geraiId,
+        transaction: {
+          geraiId,
+          dihapus: false,
+          dibatalkan: false,
+          waktu: { gte: new Date(dari), lte: new Date(sampai) },
+        },
+      },
+      select: { productId: true, jumlah: true },
+    }),
+    hppPerProduk(geraiId),
+  ]);
 
   const totalPenjualan = transaksi.reduce((a, t) => a + t.total, 0);
   const totalTunai = transaksi
@@ -170,6 +207,11 @@ router.get('/penjualan-periode', async (req: Request, res) => {
     .reduce((a, t) => a + t.total, 0);
   const totalQris = totalPenjualan - totalTunai;
   const jumlahItem = transaksi.reduce((a, t) => a + t.jumlahItem, 0);
+  const totalHpp = itemTerjual.reduce(
+    (a, ti) => a + (hppMap.get(ti.productId) ?? 0) * ti.jumlah,
+    0,
+  );
+  const labaKotor = totalPenjualan - totalHpp;
   const jumlahHari = Math.max(1, Math.round((sampai - dari) / 86_400_000));
 
   return res.json({
@@ -180,6 +222,8 @@ router.get('/penjualan-periode', async (req: Request, res) => {
     totalQris,
     jumlahTransaksi: transaksi.length,
     jumlahItem,
+    totalHpp,
+    labaKotor,
     jumlahHari,
     rataRataPerHari: Math.round(totalPenjualan / jumlahHari),
   });
@@ -258,7 +302,7 @@ router.get('/stok', async (req: Request, res) => {
     ...(q ? { nama: { contains: q, mode: 'insensitive' } } : {}),
   };
 
-  const [produk, jumlahProduk, jumlahMenipis] = await Promise.all([
+  const [produk, jumlahProduk, jumlahMenipis, hppMap] = await Promise.all([
     prisma.product.findMany({
       where,
       select: { id: true, nama: true, kategori: true, stok: true, harga: true },
@@ -267,9 +311,21 @@ router.get('/stok', async (req: Request, res) => {
     }),
     prisma.product.count({ where }),
     prisma.product.count({ where: { ...where, stok: { lte: batasMenipis } } }),
+    hppPerProduk(geraiId),
   ]);
 
-  return res.json({ jumlahProduk, jumlahMenipis, hasil: produk });
+  return res.json({
+    jumlahProduk,
+    jumlahMenipis,
+    hasil: produk.map((p) => ({
+      id: p.id,
+      nama: p.nama,
+      kategori: p.kategori,
+      stok: p.stok,
+      harga: p.harga,
+      hpp: hppMap.get(p.id) ?? 0,
+    })),
+  });
 });
 
 // ── Mutasi kas ──
@@ -359,6 +415,139 @@ router.get('/setoran', async (req: Request, res) => {
       nominal: st.nominal,
       catatan: st.catatan,
       waktuEpochMili: st.waktu.getTime(),
+    })),
+  });
+});
+
+// ── Rekap rekening ──
+
+const rekeningSchema = rentangSchema.extend({
+  limit: z.coerce.number().int().positive().max(2000).default(1000),
+});
+
+router.get('/rekening', async (req: Request, res) => {
+  const parsed = rekeningSchema.safeParse(req.query);
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'Parameter tidak valid' });
+  }
+  const { geraiId, dari, sampai, limit } = parsed.data;
+  if (!(await cekAksesGerai(req, geraiId))) {
+    return res.status(403).json({ error: 'Tidak punya akses ke gerai ini' });
+  }
+
+  const [saldoAwalRecord, mutasi, ringkasan, setoran, qris] = await Promise.all([
+    prisma.mutasiRekening.findFirst({
+      where: { geraiId, dihapus: false, tipe: 'SaldoAwal' },
+      orderBy: { waktu: 'desc' },
+    }),
+    prisma.mutasiRekening.findMany({
+      where: {
+        geraiId,
+        dihapus: false,
+        tipe: { in: ['Pemasukan', 'Penarikan'] },
+        waktu: { gte: new Date(dari), lte: new Date(sampai) },
+      },
+      orderBy: { waktu: 'asc' },
+      take: limit,
+    }),
+    prisma.mutasiRekening.groupBy({
+      by: ['tipe'],
+      where: {
+        geraiId,
+        dihapus: false,
+        tipe: { in: ['Pemasukan', 'Penarikan'] },
+        waktu: { gte: new Date(dari), lte: new Date(sampai) },
+      },
+      _sum: { nominal: true },
+    }),
+    prisma.setoran.findMany({
+      where: { geraiId, dihapus: false, waktu: { gte: new Date(dari), lte: new Date(sampai) } },
+      select: { nominal: true },
+    }),
+    prisma.transaction.aggregate({
+      where: {
+        geraiId,
+        dihapus: false,
+        dibatalkan: false,
+        metodePembayaran: 'Qris',
+        waktu: { gte: new Date(dari), lte: new Date(sampai) },
+      },
+      _sum: { total: true },
+    }),
+  ]);
+
+  const saldoAwal = saldoAwalRecord?.nominal ?? 0;
+  const totalPemasukan = ringkasan.find((r) => r.tipe === 'Pemasukan')?._sum.nominal ?? 0;
+  const totalPenarikan = ringkasan.find((r) => r.tipe === 'Penarikan')?._sum.nominal ?? 0;
+  const totalSetoran = setoran.reduce((a, s) => a + s.nominal, 0);
+  const totalPenjualanQris = qris._sum.total ?? 0;
+  const saldoAkhir = saldoAwal + totalSetoran + totalPenjualanQris + totalPemasukan - totalPenarikan;
+
+  return res.json({
+    saldoAwal,
+    totalSetoran,
+    totalPenjualanQris,
+    totalPemasukan,
+    totalPenarikan,
+    saldoAkhir,
+    mutasi: mutasi.map((m) => ({
+      id: m.id,
+      tipe: m.tipe,
+      nominal: m.nominal,
+      catatan: m.catatan,
+      waktuEpochMili: m.waktu.getTime(),
+    })),
+  });
+});
+
+// ── Riwayat penyesuaian stok ──
+
+const penyesuaianSchema = rentangSchema.extend({
+  limit: z.coerce.number().int().positive().max(2000).default(1000),
+  jenis: z.enum(['Bahan', 'Produk']).optional(),
+  entitasId: z.string().optional(),
+});
+
+router.get('/penyesuaian-stok', async (req: Request, res) => {
+  const parsed = penyesuaianSchema.safeParse(req.query);
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'Parameter tidak valid' });
+  }
+  const { geraiId, dari, sampai, limit, jenis, entitasId } = parsed.data;
+  if (!(await cekAksesGerai(req, geraiId))) {
+    return res.status(403).json({ error: 'Tidak punya akses ke gerai ini' });
+  }
+
+  const where: Prisma.PenyesuaianStokWhereInput = {
+    geraiId,
+    dihapus: false,
+    waktu: { gte: new Date(dari), lte: new Date(sampai) },
+    ...(jenis ? { jenis } : {}),
+    ...(entitasId ? { entitasId } : {}),
+  };
+
+  const [riwayat, jumlah] = await Promise.all([
+    prisma.penyesuaianStok.findMany({
+      where,
+      orderBy: { waktu: 'desc' },
+      take: limit,
+    }),
+    prisma.penyesuaianStok.count({ where }),
+  ]);
+
+  return res.json({
+    jumlah,
+    hasil: riwayat.map((p) => ({
+      id: p.id,
+      jenis: p.jenis,
+      entitasId: p.entitasId,
+      namaEntitas: p.namaEntitas,
+      stokSebelum: p.stokSebelum,
+      stokSesudah: p.stokSesudah,
+      selisih: p.selisih,
+      alasan: p.alasan,
+      dibuatOleh: p.dibuatOleh,
+      waktuEpochMili: p.waktu.getTime(),
     })),
   });
 });

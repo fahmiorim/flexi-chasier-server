@@ -21,6 +21,17 @@ enum MutasiTipe {
   Pengeluaran
 }
 
+enum StokJenis {
+  Bahan
+  Produk
+}
+
+enum MutasiRekeningTipe {
+  SaldoAwal
+  Pemasukan
+  Penarikan
+}
+
 model Tenant {
   id         String   @id @default(uuid())
   nama       String
@@ -85,6 +96,7 @@ model Product {
   stok         Int      @default(0)
   kategori     String?
   deskripsi    String?
+  fotoUri      String?
   favorit      Boolean  @default(false)
   aktif        Boolean  @default(true)
   dihapus      Boolean  @default(false)
@@ -270,6 +282,41 @@ model StoreSetting {
   waktuDiubah DateTime  @default(now()) @updatedAt
   @@unique([geraiId, id])
   @@index([tenantId, geraiId])
+}
+
+model PenyesuaianStok {
+  id           String    @id
+  tenantId     String
+  geraiId      String
+  versi        BigInt    @default(0)
+  jenis        StokJenis
+  entitasId    String
+  namaEntitas  String?
+  stokSebelum  Int
+  stokSesudah  Int
+  selisih      Int
+  alasan       String?
+  dibuatOleh   String?
+  waktu        DateTime
+  dihapus      Boolean   @default(false)
+  waktuDiubah  DateTime  @updatedAt
+  @@index([geraiId, versi])
+  @@index([geraiId, waktu])
+}
+
+model MutasiRekening {
+  id           String    @id
+  tenantId     String
+  geraiId      String
+  versi        BigInt    @default(0)
+  tipe         MutasiRekeningTipe
+  nominal      Int
+  catatan      String?
+  waktu        DateTime
+  dihapus      Boolean   @default(false)
+  waktuDiubah  DateTime  @updatedAt
+  @@index([geraiId, versi])
+  @@index([geraiId, waktu])
 }
 
 model RefreshToken {
