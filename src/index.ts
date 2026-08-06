@@ -11,6 +11,10 @@ import usersRoutes from './routes/users.js';
 
 const app = express();
 
+// Rate limit memakai alamat IP klien. Di belakang reverse proxy (produksi),
+// set TRUST_PROXY=1 (jumlah hop) agar IP asli terbaca; default 0 aman untuk lokal.
+app.set('trust proxy', Number(process.env.TRUST_PROXY ?? 0));
+
 app.use(cors());
 app.use(express.json({ limit: '2mb' }));
 

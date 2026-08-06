@@ -44,6 +44,9 @@ model User {
   passwordHash String
   peran        Peran      @default(Kasir)
   aktif        Boolean    @default(true)
+  emailTerverifikasi Boolean    @default(false)
+  kodeVerifikasiHash  String?
+  kodeVerifikasiKadaluarsa DateTime?
   waktuDibuat  DateTime   @default(now())
   gerai        UserGerai[]
   cashShifts   CashShift[]

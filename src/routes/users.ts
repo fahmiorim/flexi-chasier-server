@@ -76,6 +76,8 @@ router.post('/', requireOwner, async (req: Request, res) => {
       email,
       passwordHash,
       peran,
+      // Akun dibuat pemilik: tidak perlu verifikasi email manual.
+      emailTerverifikasi: true,
       gerai: {
         create: geraiIds.map((geraiId) => ({ geraiId })),
       },

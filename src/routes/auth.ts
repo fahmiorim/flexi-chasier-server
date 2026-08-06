@@ -1,7 +1,10 @@
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
+import { randomInt } from 'node:crypto';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma.js';
+import { kirimKodeVerifikasi } from '../lib/pengirimEmail.js';
+import { pembatasKirimUlang, pembatasLogin, pembatasRegister, pembatasVerifikasi } from '../lib/pembatas.js';
 import {
   signAccessToken,
   signRefreshToken,
@@ -10,6 +13,41 @@ import {
 
 const router = Router();
 
+// ── Bantuan verifikasi email ──
+
+const KADALUARSA_VERIFIKASI_MS = 15 * 60 * 1000; // 15 menit
+
+function kodeVerifikasiBaru(): string {
+  // 6 digit acak aman (0–999999, di-pad ke 6 digit).
+  return String(randomInt(0, 1_000_000)).padStart(6, '0');
+}
+
+// Kode di-hash dengan bcrypt (cost sama dengan password): tahan brute-force
+// offline andai database bocor. `cocokKode` memakai bcrypt.compare yang
+// internalnya sudah constant-time.
+async function hashKode(kode: string): Promise<string> {
+  return bcrypt.hash(kode, 10);
+}
+
+async function cocokKode(kode: string, hashTersimpan: string): Promise<boolean> {
+  return bcrypt.compare(kode, hashTersimpan);
+}
+
+async function buatDanKirimKode(userId: string, email: string): Promise<boolean> {
+  const kode = kodeVerifikasiBaru();
+  const kodeHash = await hashKode(kode);
+  await prisma.user.update({
+    where: { id: userId },
+    data: {
+      kodeVerifikasiHash: kodeHash,
+      kodeVerifikasiKadaluarsa: new Date(Date.now() + KADALUARSA_VERIFIKASI_MS),
+    },
+  });
+  return kirimKodeVerifikasi(email, kode);
+}
+
+// ── Register (akun dibuat, tapi WAJIB verifikasi email sebelum login) ──
+
 const registerSchema = z.object({
   namaUsaha: z.string().min(1),
   namaUser: z.string().min(1),
@@ -17,7 +55,7 @@ const registerSchema = z.object({
   password: z.string().min(6),
 });
 
-router.post('/register', async (req, res) => {
+router.post('/register', pembatasRegister, async (req, res) => {
   const parsed = registerSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: parsed.error.issues[0].message });
@@ -44,34 +82,33 @@ router.post('/register', async (req, res) => {
       email,
       passwordHash,
       peran: 'Pemilik',
+      emailTerverifikasi: false,
       gerai: {
         create: [{ geraiId: gerai.id }],
       },
     },
   });
 
-  const accessToken = signAccessToken({
-    sub: user.id,
-    tenantId: tenant.id,
-    nama: user.nama,
-    peran: user.peran,
-  });
-  const refreshToken = signRefreshToken(user.id);
+  // Kirim kode verifikasi; bila pengiriman gagal tetap balas 201 agar user
+  // bisa minta kirim ulang lewat endpoint /kirim-ulang-verifikasi.
+  await buatDanKirimKode(user.id, email);
 
+  // Token TIDAK diberikan: verifikasi email wajib sebelum login pertama.
   return res.status(201).json({
-    accessToken,
-    refreshToken,
-    user: { id: user.id, nama: user.nama, email: user.email, peran: user.peran },
-    gerai: [{ id: gerai.id, nama: gerai.nama, alamat: gerai.alamat }],
+    ok: true,
+    perluVerifikasiEmail: true,
+    email,
   });
 });
+
+// ── Login ──
 
 const loginSchema = z.object({
   email: z.string().email(),
   password: z.string().min(1),
 });
 
-router.post('/login', async (req, res) => {
+router.post('/login', pembatasLogin, async (req, res) => {
   const parsed = loginSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: 'Email dan password wajib diisi' });
@@ -85,6 +122,14 @@ router.post('/login', async (req, res) => {
   const cocok = await bcrypt.compare(password, user.passwordHash);
   if (!cocok) {
     return res.status(401).json({ error: 'Email atau password salah' });
+  }
+
+  // Blokir login sampai email diverifikasi.
+  if (!user.emailTerverifikasi) {
+    return res.status(403).json({
+      error: 'Email belum diverifikasi. Periksa kode di email Anda.',
+      perluVerifikasiEmail: true,
+    });
   }
 
   const gerai = await prisma.userGerai.findMany({
@@ -109,6 +154,76 @@ router.post('/login', async (req, res) => {
     gerai: gerai.map((g) => g.gerai),
   });
 });
+
+// ── Verifikasi email ──
+
+const verifikasiSchema = z.object({
+  email: z.string().email(),
+  kode: z.string().length(6),
+});
+
+router.post('/verifikasi-email', pembatasVerifikasi, async (req, res) => {
+  const parsed = verifikasiSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'Email dan kode 6 digit wajib diisi' });
+  }
+  const { email, kode } = parsed.data;
+
+  const user = await prisma.user.findUnique({ where: { email } });
+  if (!user) {
+    return res.status(404).json({ error: 'Email tidak terdaftar' });
+  }
+  if (user.emailTerverifikasi) {
+    return res.json({ ok: true, emailTerverifikasi: true });
+  }
+  if (!user.kodeVerifikasiHash || !user.kodeVerifikasiKadaluarsa) {
+    return res.status(400).json({ error: 'Belum ada kode verifikasi. Minta kode baru.' });
+  }
+  if (user.kodeVerifikasiKadaluarsa.getTime() < Date.now()) {
+    return res.status(400).json({ error: 'Kode sudah kedaluwarsa. Minta kode baru.' });
+  }
+  if (!(await cocokKode(kode, user.kodeVerifikasiHash))) {
+    return res.status(400).json({ error: 'Kode verifikasi salah.' });
+  }
+
+  await prisma.user.update({
+    where: { id: user.id },
+    data: {
+      emailTerverifikasi: true,
+      kodeVerifikasiHash: null,
+      kodeVerifikasiKadaluarsa: null,
+    },
+  });
+
+  return res.json({ ok: true, emailTerverifikasi: true });
+});
+
+// ── Kirim ulang kode verifikasi ──
+
+const kirimUlangSchema = z.object({
+  email: z.string().email(),
+});
+
+router.post('/kirim-ulang-verifikasi', pembatasKirimUlang, async (req, res) => {
+  const parsed = kirimUlangSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'Email wajib diisi' });
+  }
+  const { email } = parsed.data;
+
+  const user = await prisma.user.findUnique({ where: { email } });
+  if (!user) {
+    return res.status(404).json({ error: 'Email tidak terdaftar' });
+  }
+  if (user.emailTerverifikasi) {
+    return res.json({ ok: true, emailTerverifikasi: true });
+  }
+
+  await buatDanKirimKode(user.id, email);
+  return res.json({ ok: true });
+});
+
+// ── Refresh ──
 
 const refreshSchema = z.object({ refreshToken: z.string().min(1) });
 
