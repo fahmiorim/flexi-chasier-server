@@ -80,3 +80,67 @@ export async function kirimKodeResetPassword(email: string, kode: string): Promi
   console.log(`[EMAIL] Kode reset ${kodeTersembunyi(kode)} terkirim ke ${email}`);
   return true;
 }
+
+/**
+ * Helper kirim email transaksional (Resend REST, fallback log dev).
+ */
+async function kirimEmail(ke: string, subjek: string, teks: string, label: string): Promise<boolean> {
+  if (!RESEND_API_KEY) {
+    console.log(
+      `[EMAIL-DEV] ${label} untuk ${ke}` +
+        ` (isi RESEND_API_KEY di .env untuk kirim email sungguhan)`,
+    );
+    return true;
+  }
+  try {
+    const res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${RESEND_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        from: EMAIL_DARI,
+        to: [ke],
+        subject: subjek,
+        text: teks,
+      }),
+    });
+    if (!res.ok) {
+      console.error('[EMAIL] Gagal kirim:', res.status, await res.text());
+      return false;
+    }
+    console.log(`[EMAIL] ${label} terkirim ke ${ke}`);
+    return true;
+  } catch (kesalahan) {
+    console.error('[EMAIL] Gagal kirim (jaringan):', kesalahan);
+    return false;
+  }
+}
+
+/**
+ * Konfirmasi ke pemilik akun bahwa kata sandinya baru saja direset.
+ */
+export async function kirimKonfirmasiResetPassword(email: string, nama: string): Promise<boolean> {
+  return kirimEmail(
+    email,
+    'Kata sandi Anda telah direset — Flexi Kasir',
+    `Halo ${nama},\n\nKata sandi akun Anda (${email}) baru saja direset.\nJika ini dilakukan oleh Anda, abaikan email ini. Jika bukan, segera hubungi pemilik usaha Anda.\n\n— Flexi Kasir`,
+    'Konfirmasi reset kata sandi',
+  );
+}
+
+/**
+ * Pengumuman ke pemilik tenant bahwa akun kasir telah mereset kata sandinya.
+ */
+export async function kirimPemberitahuanResetPassword(
+  emailPemilik: string,
+  namaKasir: string,
+): Promise<boolean> {
+  return kirimEmail(
+    emailPemilik,
+    'Reset kata sandi akun kasir — Flexi Kasir',
+    `Halo,\n\nAkun kasir "${namaKasir}" di usaha Anda baru saja mereset kata sandinya.\nJika Anda tidak mengetahui perubahan ini, periksa akun tersebut melalui menu User di dashboard web.\n\n— Flexi Kasir`,
+    'Pengumuman reset kata sandi kasir',
+  );
+}

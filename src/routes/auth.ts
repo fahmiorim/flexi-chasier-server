@@ -3,7 +3,12 @@ import bcrypt from 'bcryptjs';
 import { randomInt } from 'node:crypto';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma.js';
-import { kirimKodeResetPassword, kirimKodeVerifikasi } from '../lib/pengirimEmail.js';
+import {
+  kirimKodeResetPassword,
+  kirimKodeVerifikasi,
+  kirimKonfirmasiResetPassword,
+  kirimPemberitahuanResetPassword,
+} from '../lib/pengirimEmail.js';
 import {
   pembatasKirimUlang,
   pembatasLogin,
@@ -302,6 +307,24 @@ router.post('/reset-password', pembatasResetPassword, async (req, res) => {
       kodeResetPasswordKadaluarsa: null,
     },
   });
+
+  // Notifikasi email: konfirmasi ke pemilik akun + pengumuman ke pemilik
+  // tenant bila akun yang di-reset bukan pemilik itu sendiri. Kegagalan
+  // pengiriman tidak menggagalkan reset.
+  try {
+    await kirimKonfirmasiResetPassword(user.email, user.nama);
+    const pemilik = await prisma.user.findMany({
+      where: { tenantId: user.tenantId, peran: 'Pemilik', aktif: true },
+      select: { email: true },
+    });
+    for (const p of pemilik) {
+      if (p.email !== user.email) {
+        await kirimPemberitahuanResetPassword(p.email, user.nama);
+      }
+    }
+  } catch (kesalahanKirim) {
+    console.error('[EMAIL] Gagal mengirim notifikasi reset password:', kesalahanKirim);
+  }
 
   return res.json({ ok: true });
 });
