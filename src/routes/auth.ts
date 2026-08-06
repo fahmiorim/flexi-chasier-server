@@ -3,8 +3,15 @@ import bcrypt from 'bcryptjs';
 import { randomInt } from 'node:crypto';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma.js';
-import { kirimKodeVerifikasi } from '../lib/pengirimEmail.js';
-import { pembatasKirimUlang, pembatasLogin, pembatasRegister, pembatasVerifikasi } from '../lib/pembatas.js';
+import { kirimKodeResetPassword, kirimKodeVerifikasi } from '../lib/pengirimEmail.js';
+import {
+  pembatasKirimUlang,
+  pembatasLogin,
+  pembatasLupaPassword,
+  pembatasRegister,
+  pembatasResetPassword,
+  pembatasVerifikasi,
+} from '../lib/pembatas.js';
 import {
   signAccessToken,
   signRefreshToken,
@@ -44,6 +51,19 @@ async function buatDanKirimKode(userId: string, email: string): Promise<boolean>
     },
   });
   return kirimKodeVerifikasi(email, kode);
+}
+
+async function buatDanKirimKodeReset(userId: string, email: string): Promise<boolean> {
+  const kode = kodeVerifikasiBaru();
+  const kodeHash = await hashKode(kode);
+  await prisma.user.update({
+    where: { id: userId },
+    data: {
+      kodeResetPasswordHash: kodeHash,
+      kodeResetPasswordKadaluarsa: new Date(Date.now() + KADALUARSA_VERIFIKASI_MS),
+    },
+  });
+  return kirimKodeResetPassword(email, kode);
 }
 
 // ── Register (akun dibuat, tapi WAJIB verifikasi email sebelum login) ──
@@ -220,6 +240,69 @@ router.post('/kirim-ulang-verifikasi', pembatasKirimUlang, async (req, res) => {
   }
 
   await buatDanKirimKode(user.id, email);
+  return res.json({ ok: true });
+});
+
+// ── Lupa / reset password ──
+
+const lupaPasswordSchema = z.object({
+  email: z.string().email(),
+});
+
+router.post('/lupa-password', pembatasLupaPassword, async (req, res) => {
+  const parsed = lupaPasswordSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'Email wajib diisi' });
+  }
+  const { email } = parsed.data;
+
+  const user = await prisma.user.findUnique({ where: { email } });
+  // Tidak bocorkan apakah email terdaftar (anti-enumerasi akun).
+  if (user) {
+    await buatDanKirimKodeReset(user.id, email);
+  }
+  return res.json({ ok: true });
+});
+
+const resetPasswordSchema = z.object({
+  email: z.string().email(),
+  kode: z.string().length(6),
+  passwordBaru: z.string().min(6),
+});
+
+router.post('/reset-password', pembatasResetPassword, async (req, res) => {
+  const parsed = resetPasswordSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'Email, kode 6 digit, dan password (min. 6 karakter) wajib diisi' });
+  }
+  const { email, kode, passwordBaru } = parsed.data;
+
+  const user = await prisma.user.findUnique({ where: { email } });
+  if (!user) {
+    // Anti-enumerasi: respon sama dengan kondisi kode salah agar tidak
+    // membocorkan apakah sebuah email terdaftar.
+    return res.status(400).json({ error: 'Email dan kode tidak cocok' });
+  }
+  if (!user.kodeResetPasswordHash || !user.kodeResetPasswordKadaluarsa) {
+    return res.status(400).json({ error: 'Belum ada permintaan reset. Minta kode baru.' });
+  }
+  if (user.kodeResetPasswordKadaluarsa.getTime() < Date.now()) {
+    return res.status(400).json({ error: 'Kode sudah kedaluwarsa. Minta kode baru.' });
+  }
+  if (!(await cocokKode(kode, user.kodeResetPasswordHash))) {
+    return res.status(400).json({ error: 'Kode reset salah.' });
+  }
+
+  const passwordHash = await bcrypt.hash(passwordBaru, 10);
+  await prisma.user.update({
+    where: { id: user.id },
+    data: {
+      passwordHash,
+      kodeResetPasswordHash: null,
+      kodeResetPasswordKadaluarsa: null,
+    },
+  });
+
   return res.json({ ok: true });
 });
 

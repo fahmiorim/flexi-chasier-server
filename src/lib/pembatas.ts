@@ -45,3 +45,25 @@ export const pembatasKirimUlang = rateLimit({
   legacyHeaders: false,
   message: PESAN,
 });
+
+/**
+ * Pembatas permintaan lupa password: 5 kali per jam per IP.
+ */
+export const pembatasLupaPassword = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  limit: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: PESAN,
+});
+
+/**
+ * Pembatas percobaan reset password (kode + password baru): 10 per 15 menit per IP.
+ */
+export const pembatasResetPassword = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: PESAN,
+});

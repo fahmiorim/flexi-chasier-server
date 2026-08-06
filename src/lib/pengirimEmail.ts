@@ -46,3 +46,37 @@ export async function kirimKodeVerifikasi(email: string, kode: string): Promise<
   console.log(`[EMAIL] Kode verifikasi ${kodeTersembunyi(kode)} terkirim ke ${email}`);
   return true;
 }
+
+/**
+ * Kirim kode reset password (6 digit). Fallback log bila tanpa RESEND_API_KEY.
+ */
+export async function kirimKodeResetPassword(email: string, kode: string): Promise<boolean> {
+  if (!RESEND_API_KEY) {
+    console.log(
+      `[EMAIL-DEV] Kode reset password untuk ${email}: ${kode}` +
+        ` (isi RESEND_API_KEY di .env untuk kirim email sungguhan)`,
+    );
+    return true;
+  }
+
+  const res = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${RESEND_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      from: EMAIL_DARI,
+      to: [email],
+      subject: 'Kode reset password — Flexi Kasir',
+      text: `Kode reset password Anda: ${kode}\n\nKode berlaku 15 menit. Jika bukan Anda yang meminta, abaikan email ini dan segera hubungi admin.\n\nSetelah reset, gunakan password baru untuk masuk.`,
+    }),
+  });
+
+  if (!res.ok) {
+    console.error('[EMAIL] Gagal mengirim reset via Resend:', res.status, await res.text());
+    return false;
+  }
+  console.log(`[EMAIL] Kode reset ${kodeTersembunyi(kode)} terkirim ke ${email}`);
+  return true;
+}
