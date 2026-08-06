@@ -21,6 +21,7 @@ import {
   signAccessToken,
   signRefreshToken,
   verifyRefreshToken,
+  hashRefreshToken,
 } from '../lib/token.js';
 
 const router = Router();
@@ -170,7 +171,14 @@ router.post('/login', pembatasLogin, async (req, res) => {
     nama: user.nama,
     peran: user.peran,
   });
-  const refreshToken = signRefreshToken(user.id);
+  const { token: refreshToken, expiresAt } = signRefreshToken(user.id);
+  await prisma.refreshToken.create({
+    data: {
+      userId: user.id,
+      tokenHash: hashRefreshToken(refreshToken),
+      expiresAt,
+    },
+  });
 
   return res.json({
     accessToken,
@@ -299,14 +307,21 @@ router.post('/reset-password', pembatasResetPassword, async (req, res) => {
   }
 
   const passwordHash = await bcrypt.hash(passwordBaru, 10);
-  await prisma.user.update({
-    where: { id: user.id },
-    data: {
-      passwordHash,
-      kodeResetPasswordHash: null,
-      kodeResetPasswordKadaluarsa: null,
-    },
-  });
+  await prisma.$transaction([
+    prisma.user.update({
+      where: { id: user.id },
+      data: {
+        passwordHash,
+        kodeResetPasswordHash: null,
+        kodeResetPasswordKadaluarsa: null,
+      },
+    }),
+    // Reset password = paksa semua sesi lain keluar (semua refresh token dicabut).
+    prisma.refreshToken.updateMany({
+      where: { userId: user.id, revokedAt: null },
+      data: { revokedAt: new Date() },
+    }),
+  ]);
 
   // Notifikasi email: konfirmasi ke pemilik akun + pengumuman ke pemilik
   // tenant bila akun yang di-reset bukan pemilik itu sendiri. Kegagalan
@@ -338,26 +353,59 @@ router.post('/refresh', async (req, res) => {
   if (!parsed.success) {
     return res.status(400).json({ error: 'refreshToken wajib diisi' });
   }
+  const tokenLama = parsed.data.refreshToken;
   try {
-    const payload = verifyRefreshToken(parsed.data.refreshToken);
+    const payload = verifyRefreshToken(tokenLama);
     const user = await prisma.user.findUnique({ where: { id: payload.sub } });
-    if (!user || !user.aktif) {
+    if (!user || !user.aktif || !user.emailTerverifikasi) {
       return res.status(401).json({ error: 'Sesi tidak valid' });
     }
+    // Refresh token harus tercatat di DB dan belum dicabut/kadaluwarsa.
+    const tersimpan = await prisma.refreshToken.findUnique({
+      where: { tokenHash: hashRefreshToken(tokenLama) },
+    });
+    if (!tersimpan || tersimpan.revokedAt != null || tersimpan.expiresAt.getTime() < Date.now()) {
+      return res.status(401).json({ error: 'Sesi tidak valid' });
+    }
+    // Rotasi: token lama dicabut, token baru diterbitkan (mencegah pemakaian
+    // ulang token curian).
+    const { token: refreshToken, expiresAt } = signRefreshToken(user.id);
+    await prisma.$transaction([
+      prisma.refreshToken.update({
+        where: { id: tersimpan.id },
+        data: { revokedAt: new Date() },
+      }),
+      prisma.refreshToken.create({
+        data: {
+          userId: user.id,
+          tokenHash: hashRefreshToken(refreshToken),
+          expiresAt,
+        },
+      }),
+    ]);
     const accessToken = signAccessToken({
       sub: user.id,
       tenantId: user.tenantId,
       nama: user.nama,
       peran: user.peran,
     });
-    const refreshToken = signRefreshToken(user.id);
     return res.json({ accessToken, refreshToken });
   } catch {
     return res.status(401).json({ error: 'refreshToken tidak valid' });
   }
 });
 
-router.post('/logout', (_req, res) => {
+const logoutSchema = z.object({ refreshToken: z.string().min(1) });
+
+router.post('/logout', async (req, res) => {
+  const parsed = logoutSchema.safeParse(req.body);
+  // Cabut token bila refresh token disertakan; idempoten, tidak pernah gagal.
+  if (parsed.success) {
+    await prisma.refreshToken.updateMany({
+      where: { tokenHash: hashRefreshToken(parsed.data.refreshToken) },
+      data: { revokedAt: new Date() },
+    });
+  }
   return res.json({ ok: true });
 });
 

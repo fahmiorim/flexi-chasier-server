@@ -184,6 +184,11 @@ router.post('/transaksi', async (req: Request, res) => {
       );
       if (!masuk) continue;
 
+      // Item transaksi dianggap state final saat transaksi naik versi (sama
+      // dengan bahan resep): baris lama dihapus dulu agar item yang dihapus
+      // di klien tidak "hidup lagi" di pull berikutnya.
+      await tx.transactionItem.deleteMany({ where: { transactionId: item.id } });
+
       for (const ti of item.items) {
         await upsertLww(
           () => tx.transactionItem.findUnique({ where: { id: ti.id }, select: { versi: true } }).then((r) => r?.versi ?? null),
@@ -794,22 +799,61 @@ router.post('/pengaturan-toko', async (req: Request, res) => {
 
 const pullSchema = z.object({
   geraiId: z.string().min(1),
-  sejakEpochMili: z.coerce.number().int().nonnegative().default(0),
   batas: z.coerce.number().int().positive().max(5000).default(1000),
+  produk: z.string().default('0:'),
+  transaksi: z.string().default('0:'),
+  meja: z.string().default('0:'),
+  shiftKas: z.string().default('0:'),
+  mutasiKas: z.string().default('0:'),
+  setoran: z.string().default('0:'),
+  bahan: z.string().default('0:'),
+  pembelianBahan: z.string().default('0:'),
+  resep: z.string().default('0:'),
+  pengaturanToko: z.string().default('0:'),
 });
+
+/** Format kursor per entitas: "<epochMili>:<id>". Kursor "0:" berarti dari awal. */
+function pecahKursor(kursor: string): { t: number; id: string } {
+  const [t = '', id = ''] = kursor.split(':');
+  return { t: Number(t) || 0, id };
+}
+
+/**
+ * Filter keyset gap-free per entitas: ambil baris dengan waktuDiubah > t,
+ * atau waktuDiubah == t dengan id > id (tie-break). Ini mencegah baris
+ * dengan timestamp SAMA (mis. import massal dalam satu milidetik) terlewat
+ * saat batch terpotong — masalah lama yang memakai kursor `Date.now()`.
+ */
+function keysetSejak(geraiId: string, kursor: string) {
+  const { t, id } = pecahKursor(kursor);
+  const sejak = new Date(t);
+  return {
+    geraiId,
+    OR: [
+      { waktuDiubah: { gt: sejak } },
+      { AND: [{ waktuDiubah: sejak }, { id: { gt: id } }] },
+    ],
+  };
+}
+
+/** Kursor baru = baris terakhir yang benar-benar dikirim (atau kursor lama bila kosong). */
+function kursorBaru(baris: Array<{ waktuDiubah: Date; id: string }>, kursor: string): string {
+  if (baris.length === 0) return kursor;
+  const terakhir = baris[baris.length - 1];
+  return `${terakhir.waktuDiubah.getTime()}:${terakhir.id}`;
+}
 
 router.get('/perubahan', async (req: Request, res) => {
   const parsed = pullSchema.safeParse(req.query);
   if (!parsed.success) {
     return res.status(400).json({ error: 'Parameter tidak valid' });
   }
-  const { geraiId, sejakEpochMili, batas } = parsed.data;
+  const { geraiId, batas, ...kursorEntitas } = parsed.data;
   if (!(await cekAksesGerai(req, geraiId))) {
     return res.status(403).json({ error: 'Tidak punya akses ke gerai ini' });
   }
 
-  const sejak = new Date(sejakEpochMili);
-  // Ambil satu baris ekstra untuk mendeteksi apakah hasil terpotong (batas terlampaui).
+  // Ambil satu baris ekstra per entitas untuk mendeteksi apakah hasil terpotong (batas terlampaui).
   const batasUji = batas + 1;
 
   const [
@@ -825,65 +869,68 @@ router.get('/perubahan', async (req: Request, res) => {
     storeSettings,
   ] = await Promise.all([
     prisma.product.findMany({
-      where: { geraiId, waktuDiubah: { gt: sejak } },
-      orderBy: { versi: 'asc' },
+      where: keysetSejak(geraiId, kursorEntitas.produk),
+      orderBy: [{ waktuDiubah: 'asc' }, { id: 'asc' }],
       take: batasUji,
     }),
     prisma.transaction.findMany({
-      where: { geraiId, waktuDiubah: { gt: sejak } },
-      orderBy: { versi: 'asc' },
+      where: keysetSejak(geraiId, kursorEntitas.transaksi),
+      orderBy: [{ waktuDiubah: 'asc' }, { id: 'asc' }],
       take: batasUji,
     }),
     prisma.table.findMany({
-      where: { geraiId, waktuDiubah: { gt: sejak } },
-      orderBy: { versi: 'asc' },
+      where: keysetSejak(geraiId, kursorEntitas.meja),
+      orderBy: [{ waktuDiubah: 'asc' }, { id: 'asc' }],
       take: batasUji,
     }),
     prisma.cashShift.findMany({
-      where: { geraiId, waktuDiubah: { gt: sejak } },
-      orderBy: { versi: 'asc' },
+      where: keysetSejak(geraiId, kursorEntitas.shiftKas),
+      orderBy: [{ waktuDiubah: 'asc' }, { id: 'asc' }],
       take: batasUji,
     }),
     prisma.cashMutation.findMany({
-      where: { geraiId, waktuDiubah: { gt: sejak } },
-      orderBy: { versi: 'asc' },
+      where: keysetSejak(geraiId, kursorEntitas.mutasiKas),
+      orderBy: [{ waktuDiubah: 'asc' }, { id: 'asc' }],
       take: batasUji,
     }),
     prisma.setoran.findMany({
-      where: { geraiId, waktuDiubah: { gt: sejak } },
-      orderBy: { versi: 'asc' },
+      where: keysetSejak(geraiId, kursorEntitas.setoran),
+      orderBy: [{ waktuDiubah: 'asc' }, { id: 'asc' }],
       take: batasUji,
     }),
     prisma.bahan.findMany({
-      where: { geraiId, waktuDiubah: { gt: sejak } },
-      orderBy: { versi: 'asc' },
+      where: keysetSejak(geraiId, kursorEntitas.bahan),
+      orderBy: [{ waktuDiubah: 'asc' }, { id: 'asc' }],
       take: batasUji,
     }),
     prisma.pembelianBahan.findMany({
-      where: { geraiId, waktuDiubah: { gt: sejak } },
-      orderBy: { versi: 'asc' },
+      where: keysetSejak(geraiId, kursorEntitas.pembelianBahan),
+      orderBy: [{ waktuDiubah: 'asc' }, { id: 'asc' }],
       take: batasUji,
     }),
     prisma.resep.findMany({
-      where: { geraiId, waktuDiubah: { gt: sejak } },
-      orderBy: { versi: 'asc' },
+      where: keysetSejak(geraiId, kursorEntitas.resep),
+      orderBy: [{ waktuDiubah: 'asc' }, { id: 'asc' }],
       take: batasUji,
     }),
     prisma.storeSetting.findMany({
-      where: { geraiId },
-      orderBy: { versi: 'asc' },
+      where: keysetSejak(geraiId, kursorEntitas.pengaturanToko),
+      orderBy: [{ waktuDiubah: 'asc' }, { id: 'asc' }],
       take: batasUji,
     }),
   ]);
 
   // Item transaksi & resepBahan tidak punya waktuDiubah sendiri: ikuti induknya.
+  // Dikirim LENGKAP per induk — item TIDAK dipotong/dipaginasikan sendiri,
+  // karena kursor keyset hanya maju per INDUK. Memotong item (seperti dulu,
+  // `> batas`) akan memajukan kursor induk padahal item-nya hilang, dan
+  // kehilangan item itu permanen di batch berikutnya.
   const transactionIds = transactions.map((t) => t.id);
   const transactionItems =
     transactionIds.length > 0
       ? await prisma.transactionItem.findMany({
           where: { transactionId: { in: transactionIds } },
           orderBy: { versi: 'asc' },
-          take: Math.max(batasUji, 5001),
         })
       : [];
 
@@ -893,14 +940,12 @@ router.get('/perubahan', async (req: Request, res) => {
       ? await prisma.resepBahan.findMany({
           where: { resepId: { in: resepIds } },
           orderBy: { versi: 'asc' },
-          take: Math.max(batasUji, 5001),
         })
       : [];
 
   // Deteksi truncation lalu potong kembali ke batas sebenarnya.
   const lebihProduk = products.length > batas;
   const lebihTransaksi = transactions.length > batas;
-  const lebihItem = transactionItems.length > batas;
   const lebihMeja = tables.length > batas;
   const lebihKas = cashShifts.length > batas;
   const lebihMutasi = cashMutations.length > batas;
@@ -908,12 +953,10 @@ router.get('/perubahan', async (req: Request, res) => {
   const lebihBahan = bahan.length > batas;
   const lebihPembelianBahan = pembelianBahan.length > batas;
   const lebihResep = resep.length > batas;
-  const lebihResepBahan = resepBahan.length > batas;
   const lebihStoreSetting = storeSettings.length > batas;
 
   if (lebihProduk) products.length = batas;
   if (lebihTransaksi) transactions.length = batas;
-  if (lebihItem) transactionItems.length = batas;
   if (lebihMeja) tables.length = batas;
   if (lebihKas) cashShifts.length = batas;
   if (lebihMutasi) cashMutations.length = batas;
@@ -921,13 +964,11 @@ router.get('/perubahan', async (req: Request, res) => {
   if (lebihBahan) bahan.length = batas;
   if (lebihPembelianBahan) pembelianBahan.length = batas;
   if (lebihResep) resep.length = batas;
-  if (lebihResepBahan) resepBahan.length = batas;
   if (lebihStoreSetting) storeSettings.length = batas;
 
   const terpotong =
     lebihProduk ||
     lebihTransaksi ||
-    lebihItem ||
     lebihMeja ||
     lebihKas ||
     lebihMutasi ||
@@ -935,11 +976,26 @@ router.get('/perubahan', async (req: Request, res) => {
     lebihBahan ||
     lebihPembelianBahan ||
     lebihResep ||
-    lebihResepBahan ||
     lebihStoreSetting;
 
+  // Kursor baru per entitas: lanjut hanya sejauh baris yang benar-benar dikirim
+  // (kunci keyset). Bila ada entitas terpotong, klien menarik lagi dengan
+  // kursor ini — tanpa melompat ke waktu server yang bisa melewatkan data.
+  const kursorBaruHasil = {
+    produk: kursorBaru(products, kursorEntitas.produk),
+    transaksi: kursorBaru(transactions, kursorEntitas.transaksi),
+    meja: kursorBaru(tables, kursorEntitas.meja),
+    shiftKas: kursorBaru(cashShifts, kursorEntitas.shiftKas),
+    mutasiKas: kursorBaru(cashMutations, kursorEntitas.mutasiKas),
+    setoran: kursorBaru(setoran, kursorEntitas.setoran),
+    bahan: kursorBaru(bahan, kursorEntitas.bahan),
+    pembelianBahan: kursorBaru(pembelianBahan, kursorEntitas.pembelianBahan),
+    resep: kursorBaru(resep, kursorEntitas.resep),
+    pengaturanToko: kursorBaru(storeSettings, kursorEntitas.pengaturanToko),
+  };
+
   return res.json({
-    waktuServerEpochMili: Date.now(),
+    kursorBaru: kursorBaruHasil,
     terpotong,
     products: products.map((p) => ({
       id: p.id,

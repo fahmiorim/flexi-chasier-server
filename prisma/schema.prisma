@@ -16,11 +16,6 @@ enum PaymentMethod {
   Qris
 }
 
-enum KasStatus {
-  Aktif
-  Selesai
-}
-
 enum MutasiTipe {
   Pemasukan
   Pengeluaran
@@ -52,6 +47,7 @@ kodeResetPasswordHash String?
     waktuDibuat  DateTime   @default(now())
   gerai        UserGerai[]
   cashShifts   CashShift[]
+  refreshTokens RefreshToken[]
   @@index([tenantId])
 }
 
@@ -263,22 +259,26 @@ model ResepBahan {
 }
 
 model StoreSetting {
-  id          String  @id
+  id          String    @id
   tenantId    String
   geraiId     String
-  versi       BigInt  @default(0)
+  versi       BigInt    @default(0)
   namaUsaha   String
   alamat      String?
   tagline     String?
   logoUri     String?
+  waktuDiubah DateTime  @default(now()) @updatedAt
   @@unique([geraiId, id])
   @@index([tenantId, geraiId])
 }
 
-model SyncCursor {
-  tenantId        String
-  geraiId         String
-  entitas         String
-  waktuSinkron    DateTime
-  @@id([tenantId, geraiId, entitas])
+model RefreshToken {
+  id          String    @id @default(uuid())
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash   String    @unique
+  expiresAt   DateTime
+  revokedAt   DateTime?
+  waktuDibuat DateTime  @default(now())
+  @@index([userId])
 }

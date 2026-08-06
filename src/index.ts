@@ -15,8 +15,25 @@ const app = express();
 // set TRUST_PROXY=1 (jumlah hop) agar IP asli terbaca; default 0 aman untuk lokal.
 app.set('trust proxy', Number(process.env.TRUST_PROXY ?? 0));
 
-app.use(cors());
-app.use(express.json({ limit: '2mb' }));
+// CORS: bila CORS_ORIGIN diisi, batasi ke daftar asal yang dipisahkan koma
+// (contoh: "https://kasir.example.com,https://admin.example.com").
+const originCors = process.env.CORS_ORIGIN;
+if (originCors) {
+  app.use(
+    cors({
+      origin: originCors
+        .split(',')
+        .map((o) => o.trim())
+        .filter(Boolean),
+    }),
+  );
+} else {
+  app.use(cors());
+}
+
+// Batas tubuh JSON diperbesar: batch sinkronisasi push bisa membawa hingga
+// 500 transaksi × 200 item (melebihi 2 MB default Express).
+app.use(express.json({ limit: '20mb' }));
 
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok', nama: 'flexi-chasier-server' });
