@@ -29,6 +29,12 @@ if (originCors) {
   );
 } else {
   app.use(cors());
+  if (process.env.NODE_ENV === 'production') {
+    console.warn(
+      '[CORS] CORS_ORIGIN tidak diatur — semua origin diizinkan. ' +
+        'Tetapkan CORS_ORIGIN (daftar asal dipisah koma) untuk produksi.',
+    );
+  }
 }
 
 // Batas tubuh JSON diperbesar: batch sinkronisasi push bisa membawa hingga

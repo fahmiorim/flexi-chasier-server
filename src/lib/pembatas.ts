@@ -67,3 +67,16 @@ export const pembatasResetPassword = rateLimit({
   legacyHeaders: false,
   message: PESAN,
 });
+
+/**
+ * Pembatas rotasi refresh token: 60 permintaan per 15 menit per IP.
+ * Token refresh sendiri ber-entropi tinggi, pembatas ini hanya mencegah
+ * pemukulan API yang tidak wajar (mis. skrip coba-coba).
+ */
+export const pembatasRefresh = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: PESAN,
+});

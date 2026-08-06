@@ -635,6 +635,15 @@ router.post('/bahan', async (req: Request, res) => {
           }),
       );
       if (masuk) diterima += 1;
+      // Integritas data: menghapus bahan juga menutup riwayat pembeliannya
+      // (versi dinaikkan agar menang di LWW) — tidak ada baris pembelian yatim
+      // yang masih tampil di pull setelah bahan dihapus.
+      if (masuk && item.dihapus) {
+        await tx.pembelianBahan.updateMany({
+          where: { geraiId, bahanId: item.id, dihapus: false },
+          data: { dihapus: true, waktuDiubah: new Date(), versi: { increment: BigInt(1) } },
+        });
+      }
     }
   });
 

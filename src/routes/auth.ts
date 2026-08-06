@@ -13,6 +13,7 @@ import {
   pembatasKirimUlang,
   pembatasLogin,
   pembatasLupaPassword,
+  pembatasRefresh,
   pembatasRegister,
   pembatasResetPassword,
   pembatasVerifikasi,
@@ -348,7 +349,7 @@ router.post('/reset-password', pembatasResetPassword, async (req, res) => {
 
 const refreshSchema = z.object({ refreshToken: z.string().min(1) });
 
-router.post('/refresh', async (req, res) => {
+router.post('/refresh', pembatasRefresh, async (req, res) => {
   const parsed = refreshSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: 'refreshToken wajib diisi' });
